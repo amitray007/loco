@@ -92,3 +92,40 @@ func TestValidateRejectsInvalidDefinitions(t *testing.T) {
 		}
 	}
 }
+
+// Delete removes a job and is idempotent.
+func TestDeleteRemovesJobAndIsIdempotent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(PutInput{Name: "job1", Kind: "cron", Spec: []byte(`{"schedule":"* * * * *","command":["/bin/true"]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	del, err := store.Delete("job1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !del.Removed {
+		t.Fatalf("expected removed, got %+v", del)
+	}
+	if _, ok := store.Snapshot().Jobs["job1"]; ok {
+		t.Fatal("job still present after delete")
+	}
+	// Second delete is a no-op, not an error.
+	again, err := store.Delete("job1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Removed {
+		t.Fatal("second delete should report Removed=false")
+	}
+	// Delete survives reopen (persisted).
+	reopened, err := Open(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Snapshot().Jobs["job1"]; ok {
+		t.Fatal("delete did not persist")
+	}
+}

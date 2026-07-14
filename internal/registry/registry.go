@@ -110,6 +110,32 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 	}, nil
 }
 
+// DeleteResult reports the outcome of a Delete.
+type DeleteResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	Revision      uint64 `json:"revision"`
+	Removed       bool   `json:"removed"`
+	Name          string `json:"name"`
+}
+
+// Delete removes a job by name. Removed is false (with no error) if it did not exist, so
+// delete is idempotent.
+func (s *Store) Delete(name string) (DeleteResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.doc.Jobs[name]; !ok {
+		return DeleteResult{SchemaVersion: SchemaVersion, Revision: s.doc.Revision, Removed: false, Name: name}, nil
+	}
+	next := cloneDocument(s.doc)
+	next.Revision++
+	delete(next.Jobs, name)
+	if err := s.persist(next); err != nil {
+		return DeleteResult{}, fmt.Errorf("persist registry: %w", err)
+	}
+	s.doc = next
+	return DeleteResult{SchemaVersion: SchemaVersion, Revision: next.Revision, Removed: true, Name: name}, nil
+}
+
 func (s *Store) Snapshot() Document {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

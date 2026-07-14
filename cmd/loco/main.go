@@ -41,36 +41,44 @@ Usage:
   loco [--config-dir DIR] cron add NAME --schedule CRON --cmd COMMAND
   loco [--config-dir DIR] cron list [--json]
   loco [--config-dir DIR] cron run-now NAME [--json]
+  loco [--config-dir DIR] cron remove NAME [--json]
   loco [--config-dir DIR] svc add NAME --cmd COMMAND
   loco [--config-dir DIR] svc list [--json]
   loco [--config-dir DIR] svc start|stop|restart NAME [--json]
+  loco [--config-dir DIR] svc remove NAME [--json]
   loco [--config-dir DIR] events emit TOPIC --data JSON [--id ID]
   loco [--config-dir DIR] events read TOPIC --cursor NAME [--limit N]
   loco [--config-dir DIR] events ack TOPIC --cursor NAME --through ID
+  loco [--config-dir DIR] events list [--json]
   loco [--config-dir DIR] status [--json]
   loco [--config-dir DIR] doctor [--json]
-  loco [--config-dir DIR] notify TITLE BODY [--channel macos|file] [--group KEY]
+  loco [--config-dir DIR] notify TITLE BODY [--channel desktop|file] [--group KEY]
+  loco version
 
 Commands:
-  daemon install     Install and start the launchd service
-  daemon uninstall   Unload and remove the launchd service
+  daemon install     Install and start the OS service (launchd on macOS, systemd on Linux)
+  daemon uninstall   Stop and remove the OS service
   daemon status      Report daemon health, PID, and uptime
-  daemon run         Run the daemon in the foreground (used by launchd)
+  daemon run         Run the daemon in the foreground (used by the OS service)
   registry put       Store a low-level job definition through the daemon
   registry list      List the daemon's loaded registry entries
   cron add           Add or update a durable 5-field schedule
   cron list          List scheduled jobs
   cron run-now       Trigger a recorded run immediately
+  cron remove        Delete a cron job
   svc add            Add and start a supervised service
   svc list           List service state, PID, and restart count
   svc start/stop     Change a service's durable desired state
   svc restart        Restart a service immediately
+  svc remove         Stop and delete a service
   events emit        Append an idempotent event to a durable topic
   events read        Read without advancing a named cursor
   events ack         Advance a cursor through an event ID
+  events list        List topics with retention and cursor status
   status             Show daemon, jobs, unread cursors, and recent alerts
   doctor             Check the local daemon and durable spine without mutations
   notify             Send a grouped human notification
+  version            Print the loco version
 
 Exit codes:
   0  success
@@ -95,6 +103,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	args = global.Args()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	if args[0] == "version" || args[0] == "--version" {
+		fmt.Fprintf(stdout, "loco %s\n", effectiveVersion())
 		return 0
 	}
 	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "doctor" && args[0] != "notify" {
@@ -453,10 +465,55 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			fmt.Fprintf(stdout, "cron job %s accepted (run %s)\n", result.Job, result.RunID)
 		}
 		return 0
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
+			return 1
+		}
+		flags := flag.NewFlagSet("cron remove", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
+			return 1
+		}
+		return removeJob(p, args[1], "cron", globalJSON || *jsonFlag, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown cron command %q\n", args[0])
 		return 1
 	}
+}
+
+// removeJob deletes a registry entry after checking it exists and is the expected kind.
+func removeJob(p paths.Paths, name, kind string, jsonOut bool, stdout, stderr io.Writer) int {
+	doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
+	if err != nil {
+		fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
+		return 2
+	}
+	job, ok := doc.Jobs[name]
+	if !ok {
+		fmt.Fprintf(stderr, "%s %q not found\n", kind, name)
+		return 1
+	}
+	if job.Kind != kind {
+		fmt.Fprintf(stderr, "%q is a %s, not a %s\n", name, job.Kind, kind)
+		return 1
+	}
+	result, err := daemon.RegistryDelete(context.Background(), p.Socket, 2*time.Second, name)
+	if err != nil {
+		fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
+		return 2
+	}
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(result)
+	} else {
+		fmt.Fprintf(stdout, "%s %s removed (revision %d)\n", kind, name, result.Revision)
+	}
+	return 0
 }
 
 func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
@@ -562,6 +619,24 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			fmt.Fprintf(stdout, "service %s %s\n", result.Name, result.State)
 		}
 		return 0
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
+			return 1
+		}
+		flags := flag.NewFlagSet("svc remove", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
+			return 1
+		}
+		// registry.delete triggers a service Reload in the daemon, which stops the
+		// now-absent service, so a separate stop call isn't required.
+		return removeJob(p, args[1], "svc", globalJSON || *jsonFlag, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown svc command %q\n", args[0])
 		return 1
@@ -672,6 +747,44 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		} else {
 			fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
 		}
+		return 0
+	case "list":
+		flags := flag.NewFlagSet("events list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco events list [--json]")
+			return 1
+		}
+		overview, err := daemon.StatusOverview(context.Background(), p.Socket, 2*time.Second)
+		if err != nil {
+			fmt.Fprintf(stderr, "list topics: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(struct {
+				SchemaVersion int                  `json:"schema_version"`
+				Topics        []events.TopicStatus `json:"topics"`
+			}{SchemaVersion: 1, Topics: overview.Topics})
+			return 0
+		}
+		if len(overview.Topics) == 0 {
+			fmt.Fprintln(stdout, "No topics.")
+			return 0
+		}
+		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "TOPIC\tLATEST\tRETAINED\tCURSORS\tNOTE")
+		for _, topic := range overview.Topics {
+			note := ""
+			if topic.Error != "" {
+				note = "unreadable: " + topic.Error
+			}
+			fmt.Fprintf(table, "%s\t%d\t%d\t%d\t%s\n", topic.Name, topic.LatestSeq, topic.Retained, len(topic.Cursors), note)
+		}
+		_ = table.Flush()
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown events command %q\n", args[0])
@@ -868,7 +981,7 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 	usage := "usage: loco notify TITLE BODY [--channel macos|file] [--group KEY] [--json]"
 	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	channel := flags.String("channel", "macos", "macos or file")
+	channel := flags.String("channel", "desktop", "desktop or file")
 	group := flags.String("group", "", "deduplication group")
 	jsonFlag := flags.Bool("json", false, "emit JSON")
 	// Accept the title/body positionals in any position relative to the flags, so both

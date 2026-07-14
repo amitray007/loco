@@ -283,6 +283,25 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			return
 		}
 		_ = encoder.Encode(result)
+	case "registry.delete":
+		var request struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode delete request: " + err.Error()})
+			return
+		}
+		result, err := registryStore.Delete(request.Name)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		if result.Removed {
+			// Drop the now-absent job from the running managers (stops a deleted service).
+			_ = cronManager.Reload()
+			_ = serviceManager.Reload()
+		}
+		_ = encoder.Encode(result)
 	case "registry.list":
 		_ = encoder.Encode(registryStore.Snapshot())
 	case "cron.run-now":

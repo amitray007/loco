@@ -713,3 +713,35 @@ func TestBadArgsPrintUsageNotSilence(t *testing.T) {
 		}
 	}
 }
+
+// B2/A2: `loco version` prints the version and exits 0.
+func TestVersionCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("version exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "loco ") {
+		t.Fatalf("version output = %q", stdout.String())
+	}
+}
+
+// B2: `loco cron remove` on a missing job reports not-found (exit 1), not silence.
+func TestCronRemoveMissingJob(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- daemon.Run(ctx, p, "remove-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "cron", "remove", "ghost"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("remove missing: code=%d stderr=%q", code, stderr.String())
+	}
+}
