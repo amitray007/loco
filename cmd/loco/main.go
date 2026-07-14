@@ -20,6 +20,7 @@ import (
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/events"
+	"github.com/amitray007/loco/internal/mcp"
 	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/platform"
@@ -54,6 +55,7 @@ Usage:
   loco [--config-dir DIR] status [--json]
   loco [--config-dir DIR] doctor [--json]
   loco [--config-dir DIR] notify TITLE BODY [--channel desktop|file] [--group KEY]
+  loco [--config-dir DIR] mcp serve
   loco version
 
 Commands:
@@ -79,6 +81,7 @@ Commands:
   status             Show daemon, jobs, unread cursors, and recent alerts
   doctor             Check the local daemon and durable spine without mutations
   notify             Send a grouped human notification
+  mcp serve          Run a stdio MCP server exposing the daemon to AI agents
   version            Print the loco version
 
 Exit codes:
@@ -136,7 +139,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "loco %s\n", effectiveVersion())
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "doctor" && args[0] != "notify" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "doctor" && args[0] != "notify" && args[0] != "mcp" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -157,6 +160,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "notify" {
 		return runNotify(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	if args[0] == "mcp" {
+		return runMCP(args[1:], p, stdout, stderr)
 	}
 	if args[0] == "registry" {
 		return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
@@ -1069,6 +1075,23 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		fmt.Fprintf(stdout, "notification suppressed by group %s\n", result.Group)
 	} else {
 		fmt.Fprintln(stdout, "notification delivered")
+	}
+	return 0
+}
+
+// runMCP dispatches `loco mcp serve`, which runs a stdio MCP server exposing the loco
+// daemon to AI agents as MCP tools. It reads newline-delimited JSON-RPC requests from
+// stdin and writes responses to stdout, so it deliberately ignores the stdout passed to
+// run() in favor of os.Stdin/os.Stdout directly — the MCP transport owns stdio for the
+// lifetime of the process.
+func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
+	if len(args) != 1 || args[0] != "serve" {
+		fmt.Fprintln(stderr, "usage: loco mcp serve")
+		return 1
+	}
+	if err := mcp.ServeVersion(context.Background(), p.Socket, effectiveVersion(), os.Stdin, stdout); err != nil {
+		fmt.Fprintf(stderr, "mcp serve: %v\n", err)
+		return 2
 	}
 	return 0
 }
