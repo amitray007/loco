@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	cronlib "github.com/robfig/cron/v3"
@@ -28,6 +29,14 @@ const maxJobLogBytes = 8 << 20 // 8 MiB per stream
 
 // runHistoryLimit bounds how many run records (and their logs) are retained per job.
 const runHistoryLimit = 200
+
+// defaultRunTimeout caps a run when a job doesn't specify one, so a hung command cannot
+// hold the per-job lock forever (which would silently skip every future firing).
+const defaultRunTimeout = time.Hour
+
+// timeoutKillGrace is how long a timed-out run's process group has to exit on SIGTERM
+// before it is SIGKILLed.
+const timeoutKillGrace = 5 * time.Second
 
 // cappedWriter writes up to limit bytes to w, then discards the rest and remembers it
 // truncated.
@@ -58,14 +67,22 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 }
 
 type Spec struct {
-	Schedule   string            `json:"schedule"`
-	Command    []string          `json:"command"`
+	Schedule string   `json:"schedule"`
+	Command  []string `json:"command"`
+	// Paused, when true, keeps the job definition but stops it from firing (the
+	// scheduler skips it on Reload). Lets an operator silence a job without deleting it.
+	Paused     bool              `json:"paused,omitempty"`
 	WorkingDir string            `json:"working_dir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	// PassthroughEnv names environment variables to inherit from the daemon's own
 	// environment at spawn time. The default child env is minimal (no inherited
 	// secrets); this is the explicit opt-in for jobs that need one.
 	PassthroughEnv []string `json:"passthrough_env,omitempty"`
+	// TimeoutMS bounds a single run's wall-clock time. 0 uses the default
+	// (defaultRunTimeout); a negative value disables the timeout entirely. Without a
+	// timeout, a hung run holds the per-job lock forever and every future firing is
+	// skipped until the daemon restarts.
+	TimeoutMS int64 `json:"timeout_ms,omitempty"`
 }
 
 type TriggerResult struct {
@@ -155,6 +172,9 @@ func (m *Manager) Reload() error {
 		if err != nil {
 			continue
 		}
+		if spec.Paused {
+			continue // keep the definition, don't schedule it
+		}
 		jobName, jobSpec := name, spec
 		id, err := m.scheduler.AddFunc(spec.Schedule, func() { m.Trigger(jobName, jobSpec, "scheduled") })
 		if err != nil {
@@ -226,15 +246,45 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 
 	outCap := &cappedWriter{w: stdout, limit: maxJobLogBytes}
 	errCap := &cappedWriter{w: stderr, limit: maxJobLogBytes}
-	cmd := exec.CommandContext(m.ctx, spec.Command[0], spec.Command[1:]...)
+
+	// Bound the run so a hung command cannot hold the per-job lock forever. The run
+	// context is derived from the manager context (so daemon shutdown still cancels)
+	// plus a per-run deadline.
+	runCtx := m.ctx
+	var cancel context.CancelFunc
+	timeout := runTimeout(spec)
+	if timeout > 0 {
+		runCtx, cancel = context.WithTimeout(m.ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(runCtx, spec.Command[0], spec.Command[1:]...)
+	// Own a process group so a timeout kills the whole tree, not just the shell.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// On timeout/cancel, escalate SIGTERM -> SIGKILL to the group instead of the
+	// default single-process SIGKILL, so grandchildren are reaped too.
+	cmd.Cancel = func() error {
+		pgid := cmd.Process.Pid
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		time.AfterFunc(timeoutKillGrace, func() {
+			if syscall.Kill(-pgid, 0) == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			}
+		})
+		return nil
+	}
 	cmd.Stdout, cmd.Stderr = outCap, errCap
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = childEnv(spec.Env, spec.PassthroughEnv)
 	err := cmd.Run()
-	if err == nil {
+	switch {
+	case err == nil:
 		record.Status = "success"
 		record.ExitCode = 0
-	} else {
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		record.Status = "timeout"
+		record.Error = fmt.Sprintf("run exceeded timeout of %s", timeout)
+		record.ExitCode = -1
+	default:
 		record.Error = err.Error()
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -265,7 +315,7 @@ func (m *Manager) finishRecord(record *RunRecord, started time.Time) {
 	record.FinishedAt = finished.Format(time.RFC3339Nano)
 	record.DurationMS = finished.Sub(started).Milliseconds()
 	m.writeRecord(*record)
-	if record.Status == "failed" && m.onFailure != nil {
+	if (record.Status == "failed" || record.Status == "timeout") && m.onFailure != nil {
 		m.onFailure(record.Job, *record)
 	}
 }
@@ -303,6 +353,19 @@ func (m *Manager) writeRecord(record RunRecord) {
 	}
 	_ = os.Rename(tmpName, filepath.Join(dir, record.ID+".json"))
 	m.pruneRuns(record.Job)
+}
+
+// runTimeout resolves the effective per-run timeout for a spec: 0 -> default, negative
+// -> disabled (returns 0 so no deadline is applied), positive -> that duration.
+func runTimeout(spec Spec) time.Duration {
+	switch {
+	case spec.TimeoutMS < 0:
+		return 0
+	case spec.TimeoutMS == 0:
+		return defaultRunTimeout
+	default:
+		return time.Duration(spec.TimeoutMS) * time.Millisecond
+	}
 }
 
 // childEnv builds the environment for a job command. It deliberately does NOT inherit

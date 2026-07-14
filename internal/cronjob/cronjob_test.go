@@ -248,3 +248,52 @@ func TestChildEnvDeclaredAndPassthrough(t *testing.T) {
 		}
 	}
 }
+
+// A hung job with a timeout is killed and recorded as "timeout" (fixes the lock-forever
+// bug where a wedged run silently skips all future firings).
+func TestRunTimeoutKillsHungJob(t *testing.T) {
+	p := cronTestPaths(t)
+	store, err := registry.Open(p.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _ := json.Marshal(Spec{Schedule: "*/5 * * * *", Command: []string{"/bin/sh", "-c", "sleep 30"}, TimeoutMS: 500})
+	store.Put(registry.PutInput{Name: "hang", Kind: "cron", Spec: spec})
+	manager := New(store, p)
+	manager.Start()
+	result, _ := manager.RunNow("hang")
+	recordPath := filepath.Join(p.RunsDir, "hang", result.RunID+".json")
+	var data []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err = os.ReadFile(recordPath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	manager.Stop()
+	var record RunRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "timeout" {
+		t.Fatalf("status = %q, want timeout", record.Status)
+	}
+	// Killed near the 500ms deadline, not after the full 30s sleep.
+	if record.DurationMS > 5000 {
+		t.Fatalf("timed-out run took %dms; expected ~500ms", record.DurationMS)
+	}
+}
+
+// A negative timeout disables the cap; runTimeout resolves the three cases.
+func TestRunTimeoutResolution(t *testing.T) {
+	if got := runTimeout(Spec{TimeoutMS: 0}); got != defaultRunTimeout {
+		t.Fatalf("default = %v, want %v", got, defaultRunTimeout)
+	}
+	if got := runTimeout(Spec{TimeoutMS: -1}); got != 0 {
+		t.Fatalf("disabled = %v, want 0", got)
+	}
+	if got := runTimeout(Spec{TimeoutMS: 2000}); got != 2*time.Second {
+		t.Fatalf("explicit = %v, want 2s", got)
+	}
+}

@@ -263,6 +263,22 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			return
 		}
 		_ = encoder.Encode(result)
+	case "events.peek":
+		var request struct {
+			Topic   string `json:"topic"`
+			Tail    int    `json:"tail"`
+			FromSeq uint64 `json:"from_seq"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode peek request: " + err.Error()})
+			return
+		}
+		result, err := eventStore.Peek(request.Topic, request.Tail, request.FromSeq)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
 	case "events.ack":
 		var request struct {
 			Topic   string `json:"topic"`
