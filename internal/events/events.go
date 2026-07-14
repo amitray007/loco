@@ -66,6 +66,19 @@ type CompactResult struct {
 	Removed        int      `json:"removed"`
 	RetiredCursors []string `json:"retired_cursors"`
 }
+type CursorStatus struct {
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	LastAckedSeq uint64 `json:"last_acked_seq"`
+	Unread       int    `json:"unread"`
+	Warning      string `json:"warning,omitempty"`
+}
+type TopicStatus struct {
+	Name      string         `json:"name"`
+	LatestSeq uint64         `json:"latest_seq"`
+	Retained  int            `json:"retained"`
+	Cursors   []CursorStatus `json:"cursors"`
+}
 
 type topicMeta struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -331,6 +344,93 @@ func (s *Store) CompactAll() ([]CompactResult, error) {
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+func (s *Store) Overview() ([]TopicStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(filepath.Join(s.root, ".meta"))
+	if errors.Is(err, os.ErrNotExist) {
+		return []TopicStatus{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make([]TopicStatus, 0, len(entries))
+	now := s.now().UTC()
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		topic := strings.TrimSuffix(entry.Name(), ".json")
+		meta, all, err := s.loadTopic(topic)
+		if err != nil {
+			return nil, err
+		}
+		cursors, err := s.loadCursors(topic)
+		if err != nil {
+			return nil, err
+		}
+		item := TopicStatus{Name: topic, LatestSeq: meta.NextSeq - 1, Retained: len(all), Cursors: make([]CursorStatus, 0, len(cursors))}
+		sort.Slice(cursors, func(i, j int) bool { return cursors[i].Name < cursors[j].Name })
+		for _, cursor := range cursors {
+			cs := CursorStatus{Name: cursor.Name, Status: cursor.Status, LastAckedSeq: cursor.LastAckedSeq}
+			var oldest time.Time
+			for _, event := range all {
+				if event.Seq > cursor.LastAckedSeq {
+					cs.Unread++
+					if oldest.IsZero() {
+						oldest, _ = time.Parse(time.RFC3339Nano, event.Timestamp)
+					}
+				}
+			}
+			if cursor.Status == "live" && !oldest.IsZero() && now.Sub(oldest) > RetentionFloor {
+				cs.Warning = fmt.Sprintf("unacked events older than 14d")
+			}
+			item.Cursors = append(item.Cursors, cs)
+		}
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
+}
+
+func (s *Store) RecentAlerts(since time.Time, limit int) ([]Alert, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	file, err := os.Open(s.alerts)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Alert{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	result := make([]Alert, 0)
+	for scanner.Scan() {
+		var alert Alert
+		if err := json.Unmarshal(scanner.Bytes(), &alert); err != nil {
+			return nil, err
+		}
+		ts, err := time.Parse(time.RFC3339Nano, alert.Timestamp)
+		if err != nil {
+			return nil, err
+		}
+		if !ts.Before(since) {
+			result = append(result, alert)
+			if len(result) > limit {
+				result = result[1:]
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Store) loadTopic(topic string) (topicMeta, []Event, error) {

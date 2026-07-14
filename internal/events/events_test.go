@@ -272,6 +272,30 @@ func TestConcurrentEmitsRemainMonotonicAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestOverviewReportsUnreadCountsAndOldEventWarning(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if _, err := store.Emit(EmitInput{Topic: "status.topic", ID: "old", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("status.topic", "consumer", 100); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(15 * 24 * time.Hour)
+	topics, err := store.Overview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(topics) != 1 || topics[0].LatestSeq != 1 || topics[0].Retained != 1 || len(topics[0].Cursors) != 1 {
+		t.Fatalf("topics=%+v", topics)
+	}
+	cursor := topics[0].Cursors[0]
+	if cursor.Unread != 1 || cursor.Warning == "" {
+		t.Fatalf("cursor=%+v", cursor)
+	}
+}
+
 func testStore(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()

@@ -45,6 +45,7 @@ Usage:
   loco [--config-dir DIR] events emit TOPIC --data JSON [--id ID]
   loco [--config-dir DIR] events read TOPIC --cursor NAME [--limit N]
   loco [--config-dir DIR] events ack TOPIC --cursor NAME --through ID
+  loco [--config-dir DIR] status [--json]
 
 Commands:
   daemon install     Install and start the launchd service
@@ -63,6 +64,7 @@ Commands:
   events emit        Append an idempotent event to a durable topic
   events read        Read without advancing a named cursor
   events ack         Advance a cursor through an event ID
+  status             Show daemon, jobs, unread cursors, and recent alerts
 
 Exit codes:
   0  success
@@ -89,7 +91,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -101,6 +103,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "daemon" {
 		return runDaemon(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	if args[0] == "status" {
+		return runStatus(args[1:], p, *jsonOutput, stdout, stderr)
 	}
 	if args[0] == "registry" {
 		return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
@@ -613,6 +618,51 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		fmt.Fprintf(stderr, "unknown events command %q\n", args[0])
 		return 1
 	}
+}
+
+func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonFlag := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: loco status [--json]")
+		return 1
+	}
+	result, err := daemon.StatusOverview(context.Background(), p.Socket, 2*time.Second)
+	if err != nil {
+		if globalJSON || *jsonFlag {
+			unhealthy := daemon.Overview{SchemaVersion: daemon.SchemaVersion, Daemon: daemon.UnhealthyStatus(effectiveVersion(), err), Jobs: []daemon.JobOverview{}, Topics: []events.TopicStatus{}, Alerts: []events.Alert{}}
+			_ = json.NewEncoder(stdout).Encode(unhealthy)
+		} else {
+			fmt.Fprintf(stderr, "loco unavailable: %v\n", err)
+		}
+		return 2
+	}
+	if globalJSON || *jsonFlag {
+		_ = json.NewEncoder(stdout).Encode(result)
+		return 0
+	}
+	fmt.Fprintf(stdout, "daemon healthy · %d jobs · %d topics · %d recent alerts\n", len(result.Jobs), len(result.Topics), len(result.Alerts))
+	for _, job := range result.Jobs {
+		last := "never"
+		if job.LastRun != nil {
+			last = job.LastRun.Status
+		}
+		fmt.Fprintf(stdout, "%s  %s  %s  last=%s\n", job.Name, job.Kind, job.State, last)
+	}
+	for _, topic := range result.Topics {
+		for _, cursor := range topic.Cursors {
+			fmt.Fprintf(stdout, "%s/%s  unread=%d", topic.Name, cursor.Name, cursor.Unread)
+			if cursor.Warning != "" {
+				fmt.Fprintf(stdout, "  warning=%s", cursor.Warning)
+			}
+			fmt.Fprintln(stdout)
+		}
+	}
+	return 0
 }
 
 func effectiveVersion() string {

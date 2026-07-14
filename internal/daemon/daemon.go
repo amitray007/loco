@@ -129,12 +129,12 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started, registryStore, cronManager, serviceManager, eventStore)
+			serveConnection(conn, state, started, p, registryStore, cronManager, serviceManager, eventStore)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, p paths.Paths, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
@@ -153,6 +153,13 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, regis
 			UptimeSeconds: int64(time.Since(started).Seconds()),
 			Version:       state.Version,
 		})
+	case "status.overview":
+		result, err := buildOverview(state, started, p, registryStore, serviceManager, eventStore)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
 	case "registry.put":
 		var input registry.PutInput
 		if err := json.NewDecoder(reader).Decode(&input); err != nil {

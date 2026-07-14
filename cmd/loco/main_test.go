@@ -368,3 +368,85 @@ func TestEventsPersistAcrossDaemonRestartAndRequireExplicitAck(t *testing.T) {
 		t.Fatalf("duplicate=%+v", duplicate)
 	}
 }
+
+func TestTopLevelStatusReflectsJobsRunsAndUnreadEvents(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-status-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "status-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+	call := func(args ...string) bytes.Buffer {
+		var stdout, stderr bytes.Buffer
+		full := append([]string{"--config-dir", root}, args...)
+		if code := run(full, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v code=%d stderr=%s", args, code, stderr.String())
+		}
+		return stdout
+	}
+	call("cron", "add", "quiet.job", "--schedule", "0 0 * * *", "--cmd", "printf done")
+	triggerJSON := call("cron", "run-now", "quiet.job", "--json")
+	var trigger cronjob.TriggerResult
+	if err := json.Unmarshal(triggerJSON.Bytes(), &trigger); err != nil {
+		t.Fatal(err)
+	}
+	recordPath := filepath.Join(p.RunsDir, "quiet.job", trigger.RunID+".json")
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(recordPath); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	call("svc", "add", "resident", "--cmd", "sleep 60", "--backoff-initial", "10ms", "--backoff-max", "20ms")
+	waitForServiceCLI(t, root, func(s service.Status) bool { return s.Name == "resident" && s.State == "running" })
+	call("events", "emit", "dispatch.topic", "--id", "waiting", "--data", `{"work":true}`)
+	call("events", "read", "dispatch.topic", "--cursor", "agent", "--json")
+	statusJSON := call("status", "--json")
+	var status daemon.Overview
+	if err := json.Unmarshal(statusJSON.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Daemon.Healthy || len(status.Jobs) != 2 || len(status.Topics) != 1 {
+		t.Fatalf("status=%+v", status)
+	}
+	if status.Topics[0].Cursors[0].Unread != 1 {
+		t.Fatalf("topic status=%+v", status.Topics)
+	}
+	var foundRun bool
+	for _, job := range status.Jobs {
+		if job.Name == "quiet.job" && job.LastRun != nil && job.LastRun.Status == "success" {
+			foundRun = true
+		}
+	}
+	if !foundRun {
+		t.Fatalf("last run missing: %+v", status.Jobs)
+	}
+	if statusJSON.Len() > 2000 {
+		t.Fatalf("status heartbeat too large: %d bytes", statusJSON.Len())
+	}
+	call("svc", "stop", "resident")
+}
+
+func TestTopLevelStatusUnavailableJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", t.TempDir(), "status", "--json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d", code)
+	}
+	var status daemon.Overview
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Daemon.Healthy || status.Jobs == nil || status.Topics == nil || status.Alerts == nil {
+		t.Fatalf("status=%+v", status)
+	}
+}
