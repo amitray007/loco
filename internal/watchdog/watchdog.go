@@ -84,11 +84,14 @@ func load(path string) (State, error) {
 		return State{}, err
 	}
 	var state State
+	// A corrupt or schema-mismatched state file must never permanently disable the
+	// watchdog — the one thing meant to guard the daemon. Reset to a fresh state and
+	// keep watching, rather than returning an error that stops all future checks.
 	if err := json.Unmarshal(data, &state); err != nil {
-		return State{}, err
+		return State{SchemaVersion: SchemaVersion}, nil
 	}
 	if state.SchemaVersion != SchemaVersion {
-		return State{}, fmt.Errorf("unsupported watchdog schema %d", state.SchemaVersion)
+		return State{SchemaVersion: SchemaVersion}, nil
 	}
 	return state, nil
 }

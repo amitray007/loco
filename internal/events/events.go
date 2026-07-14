@@ -42,8 +42,8 @@ type EmitInput struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 type EmitResult struct {
-	SchemaVersion int   `json:"schema_version"`
-	Emitted       bool  `json:"emitted"`
+	SchemaVersion int  `json:"schema_version"`
+	Emitted       bool `json:"emitted"`
 	// Expired is set when the id was recognized as a duplicate but its event has been
 	// compacted away — the emit is correctly suppressed, but the original payload is
 	// no longer retained. Distinguishes a real dedup hit from a compacted one.

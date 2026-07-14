@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/amitray007/loco/internal/notification"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -58,3 +59,35 @@ func TestThresholdAndSenderErrors(t *testing.T) {
 }
 
 var _ notification.Sender = (*sender)(nil)
+
+// F-08: a corrupt or schema-mismatched state file must self-heal, not permanently
+// disable the watchdog.
+func TestCorruptStateSelfHeals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	send := &sender{}
+	healthy := func(context.Context) error { return nil }
+	result, err := Check(context.Background(), path, 3, healthy, send)
+	if err != nil {
+		t.Fatalf("corrupt state should self-heal, got error: %v", err)
+	}
+	if !result.Healthy {
+		t.Fatalf("expected healthy after self-heal, got %+v", result)
+	}
+
+	// Schema mismatch (future version) must also reset, not error.
+	if err := os.WriteFile(path, []byte(`{"schema_version":999,"failures":5}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failure := func(context.Context) error { return errors.New("down") }
+	result, err = Check(context.Background(), path, 3, failure, send)
+	if err != nil {
+		t.Fatalf("schema mismatch should self-heal, got error: %v", err)
+	}
+	// Counter must have reset to 1, not resumed at the bogus 5.
+	if result.Failures != 1 {
+		t.Fatalf("expected failures reset to 1 after schema mismatch, got %d", result.Failures)
+	}
+}

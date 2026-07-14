@@ -227,7 +227,10 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			_, err := daemon.Status(ctx, p.Socket, 750*time.Millisecond)
 			return err
 		}
-		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, notification.MacSender{})
+		// Honor LOCO_NOTIFY_CHANNEL so the watchdog never posts a real macOS banner in
+		// a headless/CI/test context that opted into the file channel.
+		sender := notification.SenderForChannel(os.Getenv("LOCO_NOTIFY_CHANNEL"), p.Alerts)
+		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, sender)
 		if err != nil {
 			fmt.Fprintf(stderr, "watchdog check: %v\n", err)
 			return 2
