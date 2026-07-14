@@ -40,62 +40,82 @@ func Install(ctx context.Context, runner Runner, p paths.Paths, executable strin
 		return InstallResult{}, fmt.Errorf("make executable path absolute: %w", err)
 	}
 
-	desired := RenderPlist(executable, p)
-	current, readErr := os.ReadFile(p.Plist)
-	changed := readErr != nil || !bytes.Equal(current, desired)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return InstallResult{}, fmt.Errorf("read existing plist: %w", readErr)
-	}
-	if changed {
-		if err := writeAtomic(p.Plist, desired, 0o644); err != nil {
-			return InstallResult{}, fmt.Errorf("write plist: %w", err)
-		}
-	}
-
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	service := domain + "/" + paths.LaunchdLabel
-	loaded := commandOK(ctx, runner, "launchctl", "print", service)
-	if loaded && changed {
-		if out, err := runner.Run(ctx, "launchctl", "bootout", service); err != nil {
-			return InstallResult{}, commandError("bootout existing service", out, err)
-		}
-		loaded = false
+	changed, err := installOne(ctx, runner, domain, paths.LaunchdLabel, p.Plist, RenderPlist(executable, p))
+	if err != nil {
+		return InstallResult{}, err
 	}
-	if !loaded {
-		if out, err := runner.Run(ctx, "launchctl", "bootstrap", domain, p.Plist); err != nil {
-			return InstallResult{}, commandError("bootstrap service", out, err)
-		}
+	watchdogChanged, err := installOne(ctx, runner, domain, paths.WatchdogLaunchdLabel, p.WatchdogPlist, RenderWatchdogPlist(executable, p))
+	if err != nil {
+		return InstallResult{}, err
 	}
-	if out, err := runner.Run(ctx, "launchctl", "kickstart", service); err != nil {
-		return InstallResult{}, commandError("start service", out, err)
-	}
-
 	action := "already installed"
-	if changed || !loaded {
+	if changed || watchdogChanged {
 		action = "installed"
 	}
 	return InstallResult{Action: action}, nil
 }
 
 func Uninstall(ctx context.Context, runner Runner, p paths.Paths) (bool, error) {
-	_, err := os.Stat(p.Plist)
-	plistExists := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect plist: %w", err)
-	}
-
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	service := domain + "/" + paths.LaunchdLabel
+	removed := false
+	for _, item := range []struct{ label, path string }{{paths.WatchdogLaunchdLabel, p.WatchdogPlist}, {paths.LaunchdLabel, p.Plist}} {
+		exists, err := uninstallOne(ctx, runner, domain, item.label, item.path)
+		if err != nil {
+			return false, err
+		}
+		removed = removed || exists
+	}
+	return removed, nil
+}
+
+func installOne(ctx context.Context, runner Runner, domain, label, plistPath string, desired []byte) (bool, error) {
+	current, readErr := os.ReadFile(plistPath)
+	changed := readErr != nil || !bytes.Equal(current, desired)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return false, fmt.Errorf("read existing plist: %w", readErr)
+	}
+	if changed {
+		if err := writeAtomic(plistPath, desired, 0o644); err != nil {
+			return false, fmt.Errorf("write plist: %w", err)
+		}
+	}
+	service := domain + "/" + label
+	loaded := commandOK(ctx, runner, "launchctl", "print", service)
+	wasLoaded := loaded
+	if loaded && changed {
+		if out, err := runner.Run(ctx, "launchctl", "bootout", service); err != nil {
+			return false, commandError("bootout existing service", out, err)
+		}
+		loaded = false
+	}
+	if !loaded {
+		if out, err := runner.Run(ctx, "launchctl", "bootstrap", domain, plistPath); err != nil {
+			return false, commandError("bootstrap service", out, err)
+		}
+	}
+	if out, err := runner.Run(ctx, "launchctl", "kickstart", service); err != nil {
+		return false, commandError("start service", out, err)
+	}
+	return changed || !wasLoaded, nil
+}
+func uninstallOne(ctx context.Context, runner Runner, domain, label, plistPath string) (bool, error) {
+	_, err := os.Stat(plistPath)
+	exists := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	service := domain + "/" + label
 	loaded := commandOK(ctx, runner, "launchctl", "print", service)
 	if loaded {
 		if out, err := runner.Run(ctx, "launchctl", "bootout", service); err != nil {
 			return false, commandError("bootout service", out, err)
 		}
 	}
-	if err := os.Remove(p.Plist); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("remove plist: %w", err)
+	if err := os.Remove(plistPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
 	}
-	return loaded || plistExists, nil
+	return exists || loaded, nil
 }
 
 func RenderPlist(executable string, p paths.Paths) []byte {
@@ -148,6 +168,40 @@ func RenderPlist(executable string, p paths.Paths) []byte {
 </dict>
 </plist>
 `, paths.LaunchdLabel, escape(values["executable"]), escape(values["config"]), escape(values["stdout"]), escape(values["stderr"])))
+}
+
+func RenderWatchdogPlist(executable string, p paths.Paths) []byte {
+	escape := func(value string) string {
+		var b strings.Builder
+		for _, r := range value {
+			switch r {
+			case '&':
+				b.WriteString("&amp;")
+			case '<':
+				b.WriteString("&lt;")
+			case '>':
+				b.WriteString("&gt;")
+			default:
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>%s</string>
+  <key>ProgramArguments</key>
+  <array><string>%s</string><string>--config-dir</string><string>%s</string><string>daemon</string><string>watchdog</string><string>--threshold</string><string>3</string></array>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
+</dict>
+</plist>
+`, paths.WatchdogLaunchdLabel, escape(executable), escape(p.ConfigDir), escape(filepath.Join(p.LogDir, "watchdog.stdout.log")), escape(filepath.Join(p.LogDir, "watchdog.stderr.log"))))
 }
 
 func commandOK(ctx context.Context, runner Runner, name string, args ...string) bool {

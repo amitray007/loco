@@ -7,23 +7,26 @@ import (
 )
 
 const LaunchdLabel = "com.amitray007.loco"
+const WatchdogLaunchdLabel = "com.amitray007.loco.watchdog"
 
 // Paths contains every filesystem location needed by the daemon milestone.
 // ConfigDir can be overridden by --config-dir so tests and alternate installs
 // never have to touch the user's real state.
 type Paths struct {
-	ConfigDir   string
-	RunDir      string
-	LogDir      string
-	RunsDir     string
-	EventsDir   string
-	Alerts      string
-	NotifyState string
-	Socket      string
-	Lock        string
-	State       string
-	Registry    string
-	Plist       string
+	ConfigDir     string
+	RunDir        string
+	LogDir        string
+	RunsDir       string
+	EventsDir     string
+	Alerts        string
+	NotifyState   string
+	WatchdogState string
+	Socket        string
+	Lock          string
+	State         string
+	Registry      string
+	Plist         string
+	WatchdogPlist string
 }
 
 func Resolve(configOverride string) (Paths, error) {
@@ -51,18 +54,20 @@ func Resolve(configOverride string) (Paths, error) {
 	}
 	runDir := filepath.Join(configDir, "run")
 	return Paths{
-		ConfigDir:   configDir,
-		RunDir:      runDir,
-		LogDir:      filepath.Join(configDir, "logs"),
-		RunsDir:     filepath.Join(configDir, "runs"),
-		EventsDir:   filepath.Join(configDir, "events"),
-		Alerts:      filepath.Join(configDir, "alerts.jsonl"),
-		NotifyState: filepath.Join(configDir, "notify.json"),
-		Socket:      filepath.Join(runDir, "daemon.sock"),
-		Lock:        filepath.Join(runDir, "daemon.lock"),
-		State:       filepath.Join(runDir, "daemon.json"),
-		Registry:    filepath.Join(configDir, "registry.json"),
-		Plist:       filepath.Join(launchAgentsDir, LaunchdLabel+".plist"),
+		ConfigDir:     configDir,
+		RunDir:        runDir,
+		LogDir:        filepath.Join(configDir, "logs"),
+		RunsDir:       filepath.Join(configDir, "runs"),
+		EventsDir:     filepath.Join(configDir, "events"),
+		Alerts:        filepath.Join(configDir, "alerts.jsonl"),
+		NotifyState:   filepath.Join(configDir, "notify.json"),
+		WatchdogState: filepath.Join(configDir, "watchdog.json"),
+		Socket:        filepath.Join(runDir, "daemon.sock"),
+		Lock:          filepath.Join(runDir, "daemon.lock"),
+		State:         filepath.Join(runDir, "daemon.json"),
+		Registry:      filepath.Join(configDir, "registry.json"),
+		Plist:         filepath.Join(launchAgentsDir, LaunchdLabel+".plist"),
+		WatchdogPlist: filepath.Join(launchAgentsDir, WatchdogLaunchdLabel+".plist"),
 	}, nil
 }
 

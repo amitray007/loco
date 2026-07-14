@@ -16,6 +16,7 @@ import (
 	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/service"
+	watchdogpkg "github.com/amitray007/loco/internal/watchdog"
 )
 
 func TestMain(m *testing.M) { _ = os.Setenv("LOCO_NOTIFY_CHANNEL", "file"); os.Exit(m.Run()) }
@@ -546,5 +547,55 @@ func TestCrashLoopProducesOneGroupedAlert(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"--config-dir", root, "svc", "stop", "crasher"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("stop code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestWatchdogCLITracksFailuresAndResetsWhenDaemonRecovers(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-watchdog-cli-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	call := func() int {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--config-dir", root, "daemon", "watchdog", "--threshold", "3"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		return code
+	}
+	call()
+	call()
+	data, err := os.ReadFile(filepath.Join(root, "watchdog.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state watchdogpkg.State
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Failures != 2 || state.Alerted {
+		t.Fatalf("state=%+v", state)
+	}
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "watchdog-recovery") }()
+	waitForDaemon(t, p.Socket)
+	call()
+	cancel()
+	<-done
+	data, err = os.ReadFile(p.WatchdogState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Failures != 0 || state.Alerted {
+		t.Fatalf("recovered state=%+v", state)
 	}
 }

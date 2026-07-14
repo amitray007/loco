@@ -24,6 +24,7 @@ import (
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
+	"github.com/amitray007/loco/internal/watchdog"
 )
 
 var version = "devel"
@@ -205,6 +206,29 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		if err := daemon.Run(ctx, p, effectiveVersion()); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(stderr, "run daemon: %v\n", err)
 			return 2
+		}
+		return 0
+	case "watchdog":
+		flags := flag.NewFlagSet("daemon watchdog", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		threshold := flags.Int("threshold", 3, "consecutive failures before alert")
+		if err := flags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			return 1
+		}
+		checker := func(ctx context.Context) error {
+			_, err := daemon.Status(ctx, p.Socket, 750*time.Millisecond)
+			return err
+		}
+		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, notification.MacSender{})
+		if err != nil {
+			fmt.Fprintf(stderr, "watchdog check: %v\n", err)
+			return 2
+		}
+		if globalJSON {
+			_ = json.NewEncoder(stdout).Encode(result)
 		}
 		return 0
 
