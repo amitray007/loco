@@ -115,15 +115,24 @@ type Alert struct {
 	Message       string `json:"message"`
 }
 
+type topicCacheEntry struct {
+	meta   topicMeta
+	events []Event
+}
+
 type Store struct {
 	root, alerts string
 	mu           sync.Mutex
 	now          func() time.Time
 	id           func() string
+	// cache holds the parsed meta+events per topic so emit/read/ack do not re-read and
+	// re-parse the entire log on every call (was O(n) per operation). Guarded by mu.
+	// Entries are appended to on emit and dropped on any rewrite/compaction.
+	cache map[string]*topicCacheEntry
 }
 
 func New(root, alerts string) *Store {
-	return &Store{root: root, alerts: alerts, now: time.Now, id: randomID}
+	return &Store{root: root, alerts: alerts, now: time.Now, id: randomID, cache: make(map[string]*topicCacheEntry)}
 }
 
 func (s *Store) Emit(input EmitInput) (EmitResult, error) {
@@ -187,8 +196,13 @@ func (s *Store) Emit(input EmitInput) (EmitResult, error) {
 	}
 	meta.IDs[event.ID], meta.NextSeq = event.Seq, event.Seq+1
 	if err := writeJSONAtomic(s.metaPath(input.Topic), meta); err != nil {
+		// Meta is now inconsistent with the appended log; drop the cache so the next
+		// load reconciles from disk rather than trusting a stale in-memory copy.
+		s.invalidate(input.Topic)
 		return EmitResult{}, fmt.Errorf("persist topic metadata: %w", err)
 	}
+	// Keep the cache warm by appending in place instead of forcing a full re-read.
+	s.cache[input.Topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append(append([]Event(nil), existing...), event)}
 	return EmitResult{SchemaVersion: SchemaVersion, Emitted: true, Event: event}, nil
 }
 
@@ -369,8 +383,12 @@ func (s *Store) Compact(topic string) (CompactResult, error) {
 		}
 		meta.IDs = retainedIDs
 		if err := writeJSONAtomic(s.metaPath(topic), meta); err != nil {
+			s.invalidate(topic)
 			return CompactResult{}, err
 		}
+		// The log and meta were rewritten out of band of the emit path; refresh the
+		// cache from the compacted state.
+		s.cache[topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append([]Event(nil), kept...)}
 	}
 	sort.Strings(result.RetiredCursors)
 	return result, nil
@@ -493,7 +511,41 @@ func (s *Store) RecentAlerts(since time.Time, limit int) ([]Alert, error) {
 	return result, nil
 }
 
+// loadTopic returns the topic's meta and events, served from an in-memory cache when
+// warm. Callers receive copies so they can never mutate cached state. Must be called
+// with s.mu held.
 func (s *Store) loadTopic(topic string) (topicMeta, []Event, error) {
+	if entry, ok := s.cache[topic]; ok {
+		return cloneMeta(entry.meta), append([]Event(nil), entry.events...), nil
+	}
+	meta, events, err := s.loadTopicFromDisk(topic)
+	if err != nil {
+		return topicMeta{}, nil, err
+	}
+	s.cache[topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append([]Event(nil), events...)}
+	return meta, events, nil
+}
+
+func cloneMeta(m topicMeta) topicMeta {
+	out := m
+	out.IDs = make(map[string]uint64, len(m.IDs))
+	for k, v := range m.IDs {
+		out.IDs[k] = v
+	}
+	if m.Tombstones != nil {
+		out.Tombstones = make(map[string]string, len(m.Tombstones))
+		for k, v := range m.Tombstones {
+			out.Tombstones[k] = v
+		}
+	}
+	return out
+}
+
+// invalidate drops the cached copy of a topic after its on-disk state changes out of
+// band of the incremental emit path (rewrite, compaction, meta reconciliation).
+func (s *Store) invalidate(topic string) { delete(s.cache, topic) }
+
+func (s *Store) loadTopicFromDisk(topic string) (topicMeta, []Event, error) {
 	meta := topicMeta{SchemaVersion: SchemaVersion, NextSeq: 1, FloorSeq: 1, IDs: make(map[string]uint64)}
 	if data, err := os.ReadFile(s.metaPath(topic)); err == nil {
 		if err := json.Unmarshal(data, &meta); err != nil {

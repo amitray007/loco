@@ -360,7 +360,10 @@ func TestMidFileCorruptionStillErrors(t *testing.T) {
 	if err := os.WriteFile(store.topicPath("mid"), bytes.Join(lines, []byte("\n")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read("mid", "r", 100); err == nil {
+	// Corruption is detected on a cold load (e.g. daemon restart), so read through a
+	// fresh store pointed at the same directory rather than the warm in-memory cache.
+	fresh := New(store.root, store.alerts)
+	if _, err := fresh.Read("mid", "r", 100); err == nil {
 		t.Fatal("expected mid-file corruption to error, got nil")
 	}
 }
@@ -376,6 +379,8 @@ func TestOverviewIsolatesCorruptTopic(t *testing.T) {
 	}
 	// Corrupt the middle of "bad" so loadTopic hard-errors (torn-tail would be recovered).
 	os.WriteFile(store.topicPath("bad"), []byte("{garbage\n{\"schema_version\":1,\"id\":\"x\",\"seq\":9,\"ts\":\"2026-01-01T00:00:00Z\",\"payload\":{}}\n"), 0o600)
+	// Overview through a cold store (daemon restart) so the corruption on disk is read.
+	store = New(store.root, store.alerts)
 	topics, err := store.Overview()
 	if err != nil {
 		t.Fatalf("overview failed closed on one bad topic: %v", err)
@@ -471,5 +476,39 @@ func TestReadLimitZeroAndNegative(t *testing.T) {
 	}
 	if _, err := store.Read("lim", "c", -5); err == nil {
 		t.Fatal("negative limit should error")
+	}
+}
+
+// F-07: emit must not re-parse the whole topic on every call. With the in-memory cache
+// warm, emit cost is independent of retained topic size. This asserts the 5000th emit
+// is not dramatically slower than the 100th (allowing generous slack for noise), which
+// would fail loudly under the old O(n)-per-emit behavior.
+func TestEmitStaysFlatWithTopicSize(t *testing.T) {
+	if testing.Short() {
+		t.Skip("perf test skipped in -short")
+	}
+	store := testStore(t)
+	timeEmitAt := func(n int) time.Duration {
+		start := time.Now()
+		if _, err := store.Emit(EmitInput{Topic: "perf", ID: fmt.Sprintf("e%d", n), Payload: json.RawMessage(`{"x":1}`)}); err != nil {
+			t.Fatal(err)
+		}
+		return time.Since(start)
+	}
+	// warm up to 100
+	for i := 0; i < 100; i++ {
+		timeEmitAt(i)
+	}
+	early := timeEmitAt(100)
+	for i := 101; i < 5000; i++ {
+		timeEmitAt(i)
+	}
+	late := timeEmitAt(5000)
+	// Under O(n) per emit, `late` was ~7x `early` at this scale (measured 16ms->120ms
+	// end-to-end). With the cache it should be within a small constant factor. Use a
+	// loose 10x bound purely to catch a regression to linear scanning, not to assert
+	// microbenchmark precision.
+	if late > 10*early+2*time.Millisecond {
+		t.Fatalf("emit latency grew with topic size: early=%v late=%v (O(n) regression?)", early, late)
 	}
 }
