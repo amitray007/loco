@@ -23,7 +23,8 @@ crons:
 Flow: pr-watch detects a review request → `loco events emit pr-review.dispatch
 --id <sha+reason>` → live Claude session receives the `<channel>` push in
 seconds → dispatches conductor subagents → merges state under
-`loco lock acquire wok-pr-state --ttl 5m` → `loco events ack`. Session closed?
+`loco lock acquire wok-pr-state --ttl 5m` → `loco events ack pr-review.dispatch
+--cursor dev-loop --through <event-id>`. Session closed?
 The event waits; the next session's `loco hello --agent dev-loop` inherits it
 (succession). Loose ends ("author promised a follow-up issue") become
 `loco timer set --in 72h --topic pr-review.loose-ends --data '{"ref":"pr#6884"}'`.
@@ -47,11 +48,11 @@ $ loco recap --since 8h                  # human-shaped summary any time
 crons:
   sentry-poll:   { schedule: "*/10 * * * *", cmd: .claude/scripts/oncall/sentry-poll.sh,  emit: oncall.alerts }
   flower-poll:   { schedule: "*/15 * * * *", cmd: .claude/scripts/oncall/flower-poll.sh,  emit: oncall.alerts }
-  handoff-prep:  { schedule: "30 16 * * 5",  cmd: loco events emit oncall.handoff-due '{}' }
+  handoff-prep:  { schedule: "30 16 * * 5",  cmd: loco events emit oncall.handoff-due --data '{}' }
 ```
 
 The oncall session drains `oncall.alerts`; sev-worthy items also
-`loco notify --group sev`. Expensive lookups are shared:
+`loco notify "sev alert" "<summary>" --group sev`. Expensive lookups are shared:
 `loco cache exec --key sentry-top --ttl 5m -- sentry-cli issues list …`
 — the report generator and an interactive "what's burning?" share one API call.
 
@@ -77,7 +78,7 @@ sweep is one shared cron over the timers' topic.
 ```yaml
 crons:
   slack-standup-pull: { schedule: "25 9 * * 1-5",  cmd: scripts/slack-digest.sh, emit: daily.slack-digest }
-  daily-pr-review:    { schedule: "55 17 * * 1-5", cmd: loco events emit daily.review-due '{"scope":"my-prs"}' }
+  daily-pr-review:    { schedule: "55 17 * * 1-5", cmd: loco events emit daily.review-due --data '{"scope":"my-prs"}' }
 ```
 Mechanical half runs and is recorded; the judgment half (summarize, draft
 standup, flag blockers) happens when an agent drains the topic — live session,
@@ -89,7 +90,7 @@ future daily: what detects → which topic → who judges.
 ```console
 # agent, mid-review, without stopping its own work:
 $ loco run "pytest -x tests/" --project wok --reply-to replies.dev-loop
-{"run_id":"run_x91","state":"queued"}
+{"schema_version":1,"run_id":"run_x91","state":"queued"}
 # … result later arrives as an event/channel push: exit 0, 214 passed, artifact run_x91
 
 $ loco watch "gh run view 8123 --json status -q .status" --until completed \
@@ -102,7 +103,7 @@ appear in the TUI Approvals pane + a notify.
 
 ```console
 # dev conductor found a prod-smelling bug — leave it for whoever runs oncall:
-$ loco events emit tasks.oncall '{"ref":"PYTHON-DJANGO-2XX","hint":"spike at 09:00Z"}'
+$ loco events emit tasks.oncall --data '{"ref":"PYTHON-DJANGO-2XX","hint":"spike at 09:00Z"}'
 
 # two oncall workers compete; each event handled exactly once:
 $ loco events claim tasks.oncall --as oncall-worker --lease 10m
@@ -127,9 +128,12 @@ $ loco jobs promote wok/flaky-watch     # writes the stanza into .loco/jobs.yaml
 Session starts → SessionStart hook injects `hello` briefing ("1 dispatch
 pending, identity green"). Mid-work, loco finds something →
 `<channel source="loco" topic="pr-review.dispatch">{…}</channel>` appears
-within seconds; the session acts and calls the `ack` reply tool. No polling
-anywhere. On harnesses without channels, the same events arrive via MCP tools
-or plain CLI — later, never lost.
+within seconds; the session acts and acks via the CLI. No polling anywhere. On
+harnesses without channels, the same events arrive via MCP tools or plain CLI —
+later, and not lost **so long as the consumer's cursor stays live** (reads or acks
+at least once per 30-day window; a cursor idle beyond that is retired and its unread
+events become eligible for compaction — see final-plan.md §6a). The guarantee is
+"never lost for a live cursor," not unconditional.
 
 ## 11. The human experience (ui, notify, recap)
 

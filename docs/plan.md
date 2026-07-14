@@ -35,18 +35,29 @@ launchd (KeepAlive)
                         (deduped/grouped; exit-code hooks)
 ```
 
-launchd owns pm (restart on crash/boot); pm owns the children. pm's own
-supervision stays thin — value-add is uniform capture and legibility, not
-re-implementing systemd. Jobs get env injection from `loco env` and are
-project-scoped via the existing `projects.json`.
+launchd owns the loco daemon (restart on crash/boot); the daemon owns the
+children. loco's own supervision stays thin — value-add is uniform capture and
+legibility, not re-implementing systemd. Jobs get env injection from `loco env`
+and are project-scoped via the existing `projects.json`.
 
 ### Event semantics (fixed day one so they don't rot)
 
-- At-least-once delivery; consumers dedupe by event id.
-- One JSONL file per topic; append-only; `{id, ts, source_job, payload}` per line.
+- At-least-once delivery; consumers dedupe by event `id`.
+- One JSONL file per topic; append-only; `{id, seq, ts, source_job, payload}` per
+  line. `id` is the caller-facing dedup key (may be caller-supplied, not
+  monotonic); `seq` is the daemon-assigned monotonic per-topic sequence number.
 - Per-consumer cursors (`loco events read <topic> --cursor <name>`); cursors are
-  files, resettable, replayable.
-- 14-day retention, compacted by the daemon.
+  files, resettable, replayable. **Cursors store the last-acked monotonic `seq`,
+  not `id` and not a byte offset** — so compaction can delete acked events and
+  rewrite the file without losing any reader's position (an integer watermark stays
+  resolvable even after the event it named is gone). Rationale in
+  [final-plan.md §6a](final-plan.md).
+- Retention is **cursor-aware, not a flat delete**: an event is compacted only once
+  it is past the 14-day floor **and** every live cursor has acked past it; unacked
+  events are retained regardless of age. Abandoned cursors are retired after an
+  idle window so they don't pin a topic forever. Full contract (the resolution of
+  "14-day retention" vs "missed events are never lost"):
+  [final-plan.md §6a](final-plan.md).
 - Single-machine scope. No distributed pretensions.
 
 ### Notification rules
@@ -72,25 +83,33 @@ project-scoped via the existing `projects.json`.
    *Accept: crash-looping svc yields ONE grouped notification.*
 
 ### Phase 2 — the consumer contract
-6. **`loco emit` / `loco events read`** — outbox with independent cursors.
+> Canonical CLI/semantics for these are in [final-plan.md](final-plan.md); the
+> verbs are `loco events emit` / `loco events read` / `loco events ack` (there is no
+> bare `loco emit`), cursors store monotonic `seq` watermarks, and the channel is a
+> **stateless, one-way, best-effort** pusher that owns no cursor. This Phase list is
+> the eventual-platform framing; where it differs from final-plan, final-plan wins.
+
+6. **`loco events emit` / `loco events read` / `loco events ack`** — append-only
+   outbox with independent per-consumer cursors (seq watermarks).
    *Accept: two cursors drain one topic independently; replay after reset works.*
 7. **`loco status --json`** (all jobs: health, last run, unread counts per cursor)
    and **`loco recap --since <t>`** (human digest). *Accept: one call, <100ms,
    complete picture.*
 8. **loco-plugin v1** (separate small repo or `plugin/` dir): Claude Code plugin
-   bundling (a) a **channel MCP server** (~80-line TS/Bun, tails topic files,
-   pushes `notifications/claude/channel` events into live sessions, exposes an
-   `ack(topic, offset)` reply tool that commits cursors) and (b) a
-   **SessionStart hook** that drains unread events into `additionalContext`.
-   Channels are research-preview: sessions opt in via
-   `--dangerously-load-development-channels`; events are best-effort transport,
-   the files stay the source of truth. *Accept: `loco emit` while a session is
-   live → <channel> tag arrives; session restart → SessionStart hook injects
-   the backlog.*
-9. **Convert wok's `pr-watch.py`**: watch mode emits `pr-review.dispatch` via
-   `loco emit` and keeps running (no exit-per-event); wok ships `.loco/jobs.yaml`.
-   *Accept: induced dispatch appears in the topic; watcher stays up; wok loop
-   tick = one `loco events read` call.*
+   bundling (a) a **channel MCP server** (~80-line TS/Bun, tails topic files from
+   the current tail and pushes `notifications/claude/channel` events into live
+   sessions — **one-way, stateless, no reply/ack tool**; the session acks its own
+   consumer cursor via the normal `loco events ack` CLI) and (b) a **SessionStart
+   hook** that drains unread events (via `loco events read`) into
+   `additionalContext`. Channels are research-preview (Claude Code ≥2.1.80):
+   sessions opt in via `--dangerously-load-development-channels`; the channel is
+   best-effort transport, the files stay the source of truth. *Accept: an emit while
+   a session is live → `<channel>` tag arrives; session restart → SessionStart hook
+   injects the backlog from the consumer cursor.*
+9. **Convert wok's `pr-watch.py`**: `--emit` mode calls `loco events emit
+   pr-review.dispatch --id <ref>@<sha>` (idempotent) per dispatch item.
+   *Accept: induced dispatch appears in the topic; the consuming session's sweep
+   tick = one `loco events read` + drain + `ack`.*
 
 ### Phase 3 — polish (as needed)
 10. Stop-hook drain in loco-plugin (turn-boundary queue check with max-drain
