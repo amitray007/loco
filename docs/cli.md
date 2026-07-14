@@ -30,8 +30,26 @@ removes jobs the manifest no longer declares.
 normal PR (reviewable by your own PR autopilot), then `loco apply` once.
 
 ### `loco jobs list`
-Everything registered, across all projects, with kind/state/schedule.
+Everything registered, across all projects, with kind/state/schedule/owner —
+including dynamic (agent-created) jobs with their TTL and provenance.
 **Use when:** "what is this machine actually running for me?"
+
+### `loco jobs promote <job>`
+Writes a dynamic job's definition into the owning project's `.loco/jobs.yaml`
+(and clears its TTL) so it becomes a reviewed, durable, manifest-managed job.
+**Use when:** a job created on the fly has earned its keep. This is the
+spike-then-formalize lifecycle made mechanical: agents create fast, and what
+survives gets promoted into code review.
+
+### Dynamic job creation (agent-speed, no manifest required)
+`loco svc add <name> --cmd … [--ttl 24h] [--reason "…"]` and
+`loco cron add <name> --schedule … --cmd … [--ttl 7d] [--reason "…"]`
+create jobs ON THE FLY. Every dynamic job carries **provenance** (owner agent
+from `hello`, session, stated reason) and a **TTL lease** — it expires unless
+renewed (`loco jobs renew`) or promoted. `recap` surfaces expiring and
+orphaned dynamic jobs, so decay is visible, never silent.
+**Use when:** mid-task, an agent needs a watcher or a schedule NOW. Fast to
+create, impossible to orphan quietly, promotable when proven.
 
 ### `loco svc list | start | stop | restart <job>`
 Supervised long-running services: env injection from the project, stdout/stderr
@@ -105,9 +123,22 @@ language, any script.
 **Use when:** pr-watch found a dispatch; the Slack poller saw a release
 thread; a conductor wants to leave work for the oncall role.
 
+### Topic modes: broadcast vs queue
+Topics are created in one of two modes (declared at first emit or in a
+manifest):
+- **broadcast** (default): every consumer has its own cursor and sees EVERY
+  event — e.g. `pr-review.dispatch` read independently by the loop, an
+  auditor, and recap.
+- **queue**: competing consumers; `loco events claim <topic> --as <agent>
+  [--lease 10m]` hands each event to exactly ONE claimant. A crashed
+  claimant's lease expires and the event returns to the queue.
+  Complete with `loco events done <topic> --id <event-id>`.
+**Use when:** broadcast for "everyone should know"; queue for "exactly one
+of you should do this" (e.g. `tasks.oncall`).
+
 ### `loco events read <topic> --cursor <name> [--limit N] [--fail-empty]`
-Non-destructive pull from a topic at a named cursor. At-least-once: reading
-does NOT advance the cursor.
+Non-destructive pull from a broadcast topic at a named cursor.
+At-least-once: reading does NOT advance the cursor.
 **Use when:** every loop tick. Empty array + exit 0 = quiet cycle, done in
 one call.
 
@@ -123,11 +154,14 @@ All topics with per-cursor unread counts and last-event timestamps.
 consumer died.
 
 ### `loco hello --agent <name>`
-DHCP for agents: registers/returns an identity, assigns a reply topic and
-cursor, and returns a briefing — pending events, orphaned results addressed
-to you, job health, and the verbs you'll need.
-**Use when:** the FIRST call of any session in any harness. Turns an
-anonymous agent into an addressed participant in one round-trip.
+DHCP for agents — with **succession semantics**: the NAME (a role, e.g.
+`dev-loop`) owns the identity, the reply topic, the cursors, the dynamic
+jobs, and the pending work; each session is an *incarnation* that inherits
+all of it. `hello` returns the identity plus a briefing: unacked events,
+orphaned run results addressed to this role, expiring dynamic jobs, job
+health, and the verbs you'll need. Agents are mortal; roles are not.
+**Use when:** the FIRST call of any session in any harness. A successor
+session picks up exactly where its predecessor died, in one round-trip.
 
 ### `loco onboard [--harness claude|generic] [--install]`
 Emits loco's own usage instructions as a prompt block, tuned per harness
@@ -194,3 +228,25 @@ whole file convention.
 Invariant across tiers: **files are the truth; tiers only change latency.**
 An agent on tier 0 sees identical data to one on tier 3, later. Falling down
 the ladder can never lose or corrupt anything.
+
+**The channel adapter is the flagship.** loco's reason to exist includes
+proactively TELLING agents what it found — the loco-plugin channel server
+pushes events into live Claude Code sessions as `<channel source="loco"
+topic="…">` tags within seconds, filtered per session (your reply topic +
+subscribed shared topics), with `ack`/`claim` exposed as reply tools. Hooks
+and CLI remain the lossless floor beneath it.
+
+## Agent-ergonomics guarantees (the contract behind the contract)
+
+1. **Mortality-safe**: every operation assumes the caller may die mid-flight —
+   at-least-once delivery, explicit ack/done, idempotent creates, leases that
+   expire. A successor can always resume.
+2. **Sub-100ms calls; never block**: long work returns an id immediately and
+   pushes the result to your reply topic.
+3. **One-call answers**: `hello`, `status`, `recap` return complete pictures.
+4. **Machine-actionable errors**: failures carry what-to-do-next text
+   (`exit 3: identity mismatch token=X expected=Y — check .mcp.json`), not
+   bare codes.
+5. **Tenancy**: jobs/cursors/topics are owner-namespaced; per-owner rate
+   limits and job-creation caps stop one runaway agent from starving the
+   rest or the machine.

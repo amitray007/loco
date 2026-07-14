@@ -182,11 +182,30 @@ outlive a session or touch local resources. Keep Claude-native: judgment
 watching (Monitor), and OFF-LAPTOP scheduled cognition (cloud routines/
 RemoteTrigger — loco is laptop-bound by design and does not compete there).
 
+### Dynamic jobs, identity, and topic modes (agent-manner additions)
+- **Dynamic creation**: `svc add`/`cron add` work on the fly — no manifest
+  required. Dynamic jobs carry provenance (owner agent, session, reason) and
+  a TTL lease; they expire unless renewed or `jobs promote`d into the
+  manifest (which then goes through code review). Spike-then-formalize,
+  made mechanical. `recap` surfaces expiring/orphaned dynamic jobs.
+- **Identity & succession**: `hello --agent <role>` — the ROLE owns cursors,
+  reply topic, dynamic jobs, and pending work; sessions are incarnations
+  that inherit. Agents are mortal; roles are not.
+- **Topic modes**: broadcast (per-consumer cursors, everyone sees all) vs
+  queue (claim-once with leases — exactly one consumer handles each event;
+  crashed claimants' leases expire back to the queue).
+- **Tenancy & ergonomics**: owner-namespaced everything, per-owner rate/
+  creation caps, sub-100ms calls, machine-actionable errors. See
+  docs/cli.md "Agent-ergonomics guarantees".
+
 ### Phasing update
-Phase 2 = the contract (events, status/recap, hello/onboard) as tier 0/1
-(CLI + MCP serve) + loco-plugin v1 as the first adapter + pr-watch conversion.
-Phase 3 = the broker tier (run/watch/timer/cache/lock/state) + Stop-hook
-drain + TUI/pm jobs pane + Slack notify.
+Phase 2 = the contract (events with topic modes, status/recap,
+hello/onboard, dynamic svc/cron add + promote) as tier 0/1 (CLI + MCP serve)
++ **loco-plugin v1 with the CHANNEL adapter as the flagship deliverable** —
+proactively telling live sessions what loco found is the point of the
+product; hooks/CLI remain the lossless floor beneath it — + pr-watch
+conversion. Phase 3 = the broker tier (run/watch/timer/cache/lock/state) +
+Stop-hook drain + TUI/pm jobs pane + Slack notify.
 
 ### Kill criteria (re-check at end of Phase 2)
 (a) Anthropic ships durable LOCAL background execution with records, or a
