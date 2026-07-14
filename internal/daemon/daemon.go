@@ -17,6 +17,7 @@ import (
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
+	"github.com/amitray007/loco/internal/service"
 )
 
 var ErrAlreadyRunning = errors.New("daemon is already running")
@@ -50,6 +51,11 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		return fmt.Errorf("start cron manager: %w", err)
 	}
 	defer cronManager.Stop()
+	serviceManager := service.New(registryStore, p)
+	if err := serviceManager.Start(); err != nil {
+		return fmt.Errorf("start service manager: %w", err)
+	}
+	defer serviceManager.Stop()
 
 	// Only the process holding daemon.lock may remove a stale socket.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -102,12 +108,12 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started, registryStore, cronManager)
+			serveConnection(conn, state, started, registryStore, cronManager, serviceManager)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
@@ -139,7 +145,37 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, regis
 		}
 		if result.Changed {
 			_ = cronManager.Reload()
+			_ = serviceManager.Reload()
 		}
+		_ = encoder.Encode(result)
+	case "service.list":
+		_ = encoder.Encode(serviceManager.List())
+	case "service.control":
+		var request struct {
+			Name   string `json:"name"`
+			Action string `json:"action"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode service request: " + err.Error()})
+			return
+		}
+		var result service.ControlResult
+		var err error
+		switch request.Action {
+		case "start":
+			result, err = serviceManager.SetEnabled(request.Name, true)
+		case "stop":
+			result, err = serviceManager.SetEnabled(request.Name, false)
+		case "restart":
+			result, err = serviceManager.Restart(request.Name)
+		default:
+			err = fmt.Errorf("unknown service action %q", request.Action)
+		}
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = cronManager.Reload()
 		_ = encoder.Encode(result)
 	case "registry.list":
 		_ = encoder.Encode(registryStore.Snapshot())

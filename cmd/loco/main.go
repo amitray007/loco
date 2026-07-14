@@ -21,6 +21,7 @@ import (
 	"github.com/amitray007/loco/internal/launchd"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
+	"github.com/amitray007/loco/internal/service"
 )
 
 var version = "devel"
@@ -37,6 +38,9 @@ Usage:
   loco [--config-dir DIR] cron add NAME --schedule CRON --cmd COMMAND
   loco [--config-dir DIR] cron list [--json]
   loco [--config-dir DIR] cron run-now NAME [--json]
+  loco [--config-dir DIR] svc add NAME --cmd COMMAND
+  loco [--config-dir DIR] svc list [--json]
+  loco [--config-dir DIR] svc start|stop|restart NAME [--json]
 
 Commands:
   daemon install     Install and start the launchd service
@@ -48,6 +52,10 @@ Commands:
   cron add           Add or update a durable 5-field schedule
   cron list          List scheduled jobs
   cron run-now       Trigger a recorded run immediately
+  svc add            Add and start a supervised service
+  svc list           List service state, PID, and restart count
+  svc start/stop     Change a service's durable desired state
+  svc restart        Restart a service immediately
 
 Exit codes:
   0  success
@@ -74,7 +82,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -90,7 +98,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "registry" {
 		return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
 	}
-	return runCron(args[1:], p, *jsonOutput, stdout, stderr)
+	if args[0] == "cron" {
+		return runCron(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	return runService(args[1:], p, *jsonOutput, stdout, stderr)
 }
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
@@ -378,6 +389,107 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown cron command %q\n", args[0])
+		return 1
+	}
+}
+
+func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: loco svc add|list|start|stop|restart")
+		return 1
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			return 1
+		}
+		name := args[1]
+		flags := flag.NewFlagSet("svc add", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		command := flags.String("cmd", "", "shell command")
+		restart := flags.String("restart", "always", "always, on-failure, or never")
+		workingDir := flags.String("working-dir", "", "working directory")
+		initial := flags.Duration("backoff-initial", time.Second, "initial restart delay")
+		maximum := flags.Duration("backoff-max", 30*time.Second, "maximum restart delay")
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 || *command == "" {
+			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			return 1
+		}
+		spec := service.Spec{Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Restart: *restart, Enabled: true, BackoffInitial: initial.Milliseconds(), BackoffMax: maximum.Milliseconds()}
+		raw, _ := json.Marshal(spec)
+		if _, err := service.DecodeSpec(raw); err != nil {
+			fmt.Fprintf(stderr, "invalid service: %v\n", err)
+			return 1
+		}
+		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, registry.PutInput{Name: name, Kind: "svc", Spec: raw})
+		if err != nil {
+			fmt.Fprintf(stderr, "add service: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else if result.Changed {
+			fmt.Fprintf(stdout, "service %s stored and starting (revision %d)\n", name, result.Revision)
+		} else {
+			fmt.Fprintf(stdout, "service %s unchanged (revision %d)\n", name, result.Revision)
+		}
+		return 0
+	case "list":
+		flags := flag.NewFlagSet("svc list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return 1
+		}
+		result, err := daemon.ServiceList(context.Background(), p.Socket, 2*time.Second)
+		if err != nil {
+			fmt.Fprintf(stderr, "list services: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+			return 0
+		}
+		if len(result.Services) == 0 {
+			fmt.Fprintln(stdout, "No services.")
+			return 0
+		}
+		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "NAME\tSTATE\tPID\tRESTARTS")
+		for _, item := range result.Services {
+			fmt.Fprintf(table, "%s\t%s\t%d\t%d\n", item.Name, item.State, item.PID, item.Restarts)
+		}
+		_ = table.Flush()
+		return 0
+	case "start", "stop", "restart":
+		if len(args) < 2 {
+			fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
+			return 1
+		}
+		flags := flag.NewFlagSet("svc "+args[0], flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
+			return 1
+		}
+		result, err := daemon.ServiceControl(context.Background(), p.Socket, 2*time.Second, args[1], args[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "%s service: %v\n", args[0], err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else {
+			fmt.Fprintf(stdout, "service %s %s\n", result.Name, result.State)
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown svc command %q\n", args[0])
 		return 1
 	}
 }

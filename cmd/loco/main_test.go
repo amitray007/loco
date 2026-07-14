@@ -12,6 +12,7 @@ import (
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/service"
 )
 
 func TestStatusJSON(t *testing.T) {
@@ -213,4 +214,79 @@ func waitForDaemon(t *testing.T, socket string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("daemon did not become healthy")
+}
+
+func TestServiceCLIControlsAndSupervisesProcess(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-service-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "service-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "svc", "add", "worker", "--cmd", "sleep 60", "--backoff-initial", "10ms", "--backoff-max", "20ms", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("add code=%d stderr=%s", code, stderr.String())
+	}
+	first := waitForServiceCLI(t, root, func(s service.Status) bool { return s.State == "running" && s.PID > 0 })
+	proc, _ := os.FindProcess(first.PID)
+	if err := proc.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	second := waitForServiceCLI(t, root, func(s service.Status) bool { return s.State == "running" && s.PID != first.PID && s.Restarts >= 1 })
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "svc", "restart", "worker", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("restart code=%d stderr=%s", code, stderr.String())
+	}
+	third := waitForServiceCLI(t, root, func(s service.Status) bool { return s.State == "running" && s.PID != second.PID })
+	if third.PID == second.PID {
+		t.Fatal("restart did not replace process")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "svc", "stop", "worker", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("stop code=%d stderr=%s", code, stderr.String())
+	}
+	waitForServiceCLI(t, root, func(s service.Status) bool { return s.State == "stopped" && !s.Enabled })
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "svc", "start", "worker", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("start code=%d stderr=%s", code, stderr.String())
+	}
+	waitForServiceCLI(t, root, func(s service.Status) bool { return s.State == "running" && s.Enabled })
+}
+
+func waitForServiceCLI(t *testing.T, root string, ready func(service.Status) bool) service.Status {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var stdout, stderr bytes.Buffer
+		if run([]string{"--config-dir", root, "svc", "list", "--json"}, &stdout, &stderr) == 0 {
+			var result service.ListResult
+			if json.Unmarshal(stdout.Bytes(), &result) == nil {
+				for _, status := range result.Services {
+					if ready(status) {
+						return status
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("service did not reach expected CLI state")
+	return service.Status{}
 }
