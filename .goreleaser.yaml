@@ -1,0 +1,97 @@
+version: 2
+
+project_name: loco
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: loco
+    main: ./cmd/loco
+    binary: loco
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: loco
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next+{{ .ShortCommit }}"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance improvements
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Documentation
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Others
+      order: 999
+
+# NOTE: goreleaser v2 (>= 2.10, enforced since 2.16) deprecated the old
+# `brews:` (Homebrew Formula) key in favor of `homebrew_casks:`. `brews` still
+# parses but fails `goreleaser check` on this goreleaser version, so this repo
+# targets the supported key. Casks support `caveats`/`description`/
+# `homepage`/`license`/`commit_author` just like formulas did; they do not
+# support a Ruby `test do ... end` block, so basic upgrade/install sanity is
+# instead covered by the `binaries` + `caveats` fields below and by CI.
+homebrew_casks:
+  - name: loco
+    repository:
+      owner: amitray007
+      name: homebrew-tap
+    directory: Casks
+    homepage: "https://github.com/amitray007/loco"
+    description: "loco — the Local Operator: a durable local runner + event bus"
+    license: MIT
+    commit_author:
+      name: loco-release-bot
+      email: loco-release-bot@users.noreply.github.com
+    binaries:
+      - loco
+    caveats: |
+      loco is installed, but the background daemon is NOT started automatically.
+
+      To install and start the daemon (launchd on macOS, systemd on Linux), run:
+        loco daemon install
+
+      The daemon requires an active login session to run under launchd/systemd
+      user services. See `loco daemon status` to check health after install.
+
+release:
+  github:
+    owner: amitray007
+    name: loco
+  draft: true

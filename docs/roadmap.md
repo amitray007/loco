@@ -70,7 +70,7 @@ gap · **[polish]** quality/DX · **[deferred]** intentionally out of scope for 
   there is no `loco --version` / `loco version` subcommand yet — add one.)
 - **`goreleaser`**: cross-compile darwin/arm64 + darwin/amd64 (and linux if in scope —
   see §3.1), build tarballs + checksums, create GitHub Releases on tag.
-- **Homebrew formula/tap**: a `homebrew-loco` tap (or a formula PR to homebrew-core
+- **Homebrew formula/tap**: a `homebrew-tap` tap (or a formula PR to homebrew-core
   once it qualifies) that installs the binary. goreleaser can auto-update the tap
   formula on release. The formula must handle that loco is a launchd-managed daemon —
   document `loco daemon install` as a post-install step (do NOT auto-load a launchd
@@ -150,7 +150,7 @@ process-group signalling). For an OSS project, decide:
   without this.
 
 ### 3.2 Naming/identity **[decision]**
-- `com.amitray007.loco` launchd labels and the module path bake in a personal
+- `dev.loco.daemon` launchd labels and the module path bake in a personal
   identity. Fine for a personal OSS project; just confirm that's intended for a public
   release (vs. an org).
 

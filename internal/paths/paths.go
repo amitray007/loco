@@ -9,8 +9,8 @@ import (
 
 // Label is the reverse-DNS identifier used for the OS service unit (launchd label on
 // macOS, systemd unit basename on Linux).
-const Label = "com.amitray007.loco"
-const WatchdogLabel = "com.amitray007.loco.watchdog"
+const Label = "dev.loco.daemon"
+const WatchdogLabel = "dev.loco.watchdog"
 
 // LaunchdLabel/WatchdogLaunchdLabel are retained as aliases for the macOS launchd
 // backend, which references them directly.
