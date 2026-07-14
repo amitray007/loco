@@ -122,12 +122,12 @@ func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
 	}
-	if !report.Healthy || len(report.Checks) != 6 {
+	if !report.Healthy || len(report.Checks) != 7 {
 		t.Fatalf("report = %+v", report)
 	}
 	want := map[string]string{
 		"runtime-paths": "pass", "daemon-rpc": "pass", "registry": "pass",
-		"durable-stores": "pass", "service-unit": "warn", "watchdog-unit": "warn",
+		"durable-stores": "pass", "disk-usage": "pass", "service-unit": "warn", "watchdog-unit": "warn",
 	}
 	for _, check := range report.Checks {
 		if check.Status != want[check.Name] {

@@ -32,7 +32,18 @@ type runtimeState struct {
 	Version       string `json:"version"`
 }
 
+// maxUnixSocketPath is the portable ceiling for a unix socket path (sun_path is 104
+// bytes on macOS/BSD, 108 on Linux). We validate against the smaller bound so a config
+// dir that works on one OS works on both.
+const maxUnixSocketPath = 104
+
 func Run(ctx context.Context, p paths.Paths, version string) error {
+	// Preflight the socket path length: a too-long path fails deep in the net stack
+	// with an opaque "bind: invalid argument". Catch it here with an actionable message.
+	if len(p.Socket) >= maxUnixSocketPath {
+		return fmt.Errorf("socket path is too long (%d >= %d bytes): choose a shorter --config-dir\n  %s",
+			len(p.Socket), maxUnixSocketPath, p.Socket)
+	}
 	if err := p.EnsureRuntimeDirs(); err != nil {
 		return err
 	}

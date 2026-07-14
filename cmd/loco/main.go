@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -966,6 +967,17 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		}
 	}
 
+	// Disk-usage check: surface unbounded growth in the runs/logs dirs before it fills
+	// the disk. Warn past a soft threshold; the retention sweep should keep it under.
+	usage := dirSize(p.RunsDir) + dirSize(p.LogDir)
+	const warnBytes = 512 << 20 // 512 MiB
+	usageDetail := fmt.Sprintf("runs+logs use %s", humanBytes(usage))
+	if usage > warnBytes {
+		add("disk-usage", "warn", usageDetail+" (over 512 MiB; check job output volume)")
+	} else {
+		add("disk-usage", "pass", usageDetail)
+	}
+
 	for _, item := range []struct {
 		name string
 		path string
@@ -1108,6 +1120,36 @@ func awaitDaemonReady(socket string, timeout time.Duration) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// dirSize returns the total size in bytes of all regular files under root, best-effort
+// (0 if the dir is missing or unreadable).
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// humanBytes renders a byte count as a compact human-readable string.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func formatUptime(seconds int64) string {
