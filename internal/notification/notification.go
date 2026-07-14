@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -47,16 +46,6 @@ type groupState struct {
 type Sender interface {
 	Send(context.Context, string, string) error
 }
-type MacSender struct{}
-
-func (MacSender) Send(ctx context.Context, title, body string) error {
-	script := appleScript(title, body)
-	output, err := exec.CommandContext(ctx, "osascript", "-e", script).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("osascript: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
 
 // FileSender writes notifications to the alerts log instead of the desktop. It lets the
 // watchdog (and any headless/CI context) honor LOCO_NOTIFY_CHANNEL=file so a background
@@ -68,17 +57,18 @@ func (f FileSender) Send(_ context.Context, title, body string) error {
 }
 
 // SenderForChannel returns the sender matching LOCO_NOTIFY_CHANNEL semantics: "file"
-// routes to the alerts log, anything else (default) to the desktop.
+// routes to the alerts log, anything else (default) to the OS desktop notifier
+// (osascript on macOS, notify-send on Linux).
 func SenderForChannel(channel, alertsPath string) Sender {
 	if channel == "file" {
 		return FileSender{AlertsPath: alertsPath}
 	}
-	return MacSender{}
+	return DesktopSender()
 }
 
-func appleScript(title, body string) string {
-	return fmt.Sprintf(`display notification "%s" with title "%s"`, escapeAppleScript(body), escapeAppleScript(title))
-}
+// DesktopChannelName is the platform-appropriate label for the desktop channel, used in
+// help text so macOS users see "macos"/"desktop" and Linux users see "desktop".
+func DesktopChannelName() string { return "desktop" }
 
 type Manager struct {
 	mu                    sync.Mutex
@@ -102,10 +92,14 @@ func (m *Manager) Send(ctx context.Context, input Input) (Result, error) {
 		return Result{}, errors.New("title and body are required")
 	}
 	if input.Channel == "" {
-		input.Channel = "macos"
+		input.Channel = "desktop"
 	}
-	if input.Channel != "macos" && input.Channel != "file" {
-		return Result{}, fmt.Errorf("unsupported notification channel %q", input.Channel)
+	// "macos" is accepted as a back-compat alias for the OS desktop channel.
+	if input.Channel == "macos" {
+		input.Channel = "desktop"
+	}
+	if input.Channel != "desktop" && input.Channel != "file" {
+		return Result{}, fmt.Errorf("unsupported notification channel %q (use desktop or file)", input.Channel)
 	}
 	state, err := m.load()
 	if err != nil {
@@ -123,9 +117,9 @@ func (m *Manager) Send(ctx context.Context, input Input) (Result, error) {
 			}
 		}
 	}
-	if input.Channel == "macos" {
+	if input.Channel == "desktop" {
 		if m.sender == nil {
-			return Result{}, errors.New("macOS notification sender is unavailable")
+			return Result{}, errors.New("desktop notification sender is unavailable")
 		}
 		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err = m.sender.Send(sendCtx, input.Title, input.Body)
@@ -166,13 +160,6 @@ func (m *Manager) load() (groupState, error) {
 		state.Groups = map[string]string{}
 	}
 	return state, nil
-}
-func escapeAppleScript(value string) string {
-	value = strings.ReplaceAll(value, "\\", "\\\\")
-	value = strings.ReplaceAll(value, "\"", "\\\"")
-	value = strings.ReplaceAll(value, "\r", " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	return value
 }
 func writeJSONAtomic(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")

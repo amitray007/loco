@@ -49,10 +49,10 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
-	notifier := notification.New(p.NotifyState, p.Alerts, notification.MacSender{})
+	notifier := notification.New(p.NotifyState, p.Alerts, notification.DesktopSender())
 	automaticChannel := os.Getenv("LOCO_NOTIFY_CHANNEL")
 	if automaticChannel == "" {
-		automaticChannel = "macos"
+		automaticChannel = "desktop"
 	}
 	failureHandler := func(name string, record cronjob.RunRecord) {
 		_, _ = notifier.Send(context.Background(), notification.Input{Title: "loco job failed", Body: fmt.Sprintf("%s exited with code %d", name, record.ExitCode), Channel: automaticChannel, Group: "job-failure:" + name})

@@ -127,7 +127,7 @@ func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
 	}
 	want := map[string]string{
 		"runtime-paths": "pass", "daemon-rpc": "pass", "registry": "pass",
-		"durable-stores": "pass", "launchd-daemon": "warn", "launchd-watchdog": "warn",
+		"durable-stores": "pass", "service-unit": "warn", "watchdog-unit": "warn",
 	}
 	for _, check := range report.Checks {
 		if check.Status != want[check.Name] {

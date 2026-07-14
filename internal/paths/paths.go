@@ -7,12 +7,20 @@ import (
 	"strings"
 )
 
-const LaunchdLabel = "com.amitray007.loco"
-const WatchdogLaunchdLabel = "com.amitray007.loco.watchdog"
+// Label is the reverse-DNS identifier used for the OS service unit (launchd label on
+// macOS, systemd unit basename on Linux).
+const Label = "com.amitray007.loco"
+const WatchdogLabel = "com.amitray007.loco.watchdog"
 
-// Paths contains every filesystem location needed by the daemon milestone.
-// ConfigDir can be overridden by --config-dir so tests and alternate installs
-// never have to touch the user's real state.
+// LaunchdLabel/WatchdogLaunchdLabel are retained as aliases for the macOS launchd
+// backend, which references them directly.
+const LaunchdLabel = Label
+const WatchdogLaunchdLabel = WatchdogLabel
+
+// Paths contains every filesystem location needed by the daemon. ConfigDir can be
+// overridden by --config-dir (or LOCO_CONFIG_DIR) so tests and alternate installs never
+// have to touch the user's real state. ServiceUnit/WatchdogUnit are the OS-appropriate
+// service definition files (launchd .plist on macOS, systemd .service on Linux).
 type Paths struct {
 	ConfigDir     string
 	RunDir        string
@@ -26,9 +34,14 @@ type Paths struct {
 	Lock          string
 	State         string
 	Registry      string
-	Plist         string
-	WatchdogPlist string
+	ServiceUnit   string
+	WatchdogUnit  string
 }
+
+// Plist and WatchdogPlist are backward-compatible accessors for the macOS launchd
+// backend, which speaks in terms of plists.
+func (p Paths) Plist() string         { return p.ServiceUnit }
+func (p Paths) WatchdogPlist() string { return p.WatchdogUnit }
 
 func Resolve(configOverride string) (Paths, error) {
 	home, err := os.UserHomeDir()
@@ -38,12 +51,17 @@ func Resolve(configOverride string) (Paths, error) {
 
 	configDir := configOverride
 	if configDir == "" {
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		// Explicit LOCO_CONFIG_DIR wins over XDG so callers (and wok's pr-watch, which
+		// sets it) can pin the config dir without a flag.
+		if env := os.Getenv("LOCO_CONFIG_DIR"); env != "" {
+			configDir = env
+		} else if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 			configDir = filepath.Join(xdg, "loco")
 		} else {
 			configDir = filepath.Join(home, ".config", "loco")
 		}
-	} else if configDir == "~" {
+	}
+	if configDir == "~" {
 		configDir = home
 	} else if strings.HasPrefix(configDir, "~/") {
 		// Expand a leading ~ so a quoted or unexpanded tilde does not create a stray
@@ -55,9 +73,9 @@ func Resolve(configOverride string) (Paths, error) {
 		return Paths{}, fmt.Errorf("make config path absolute: %w", err)
 	}
 
-	launchAgentsDir := os.Getenv("LOCO_LAUNCH_AGENTS_DIR")
-	if launchAgentsDir == "" {
-		launchAgentsDir = filepath.Join(home, "Library", "LaunchAgents")
+	unitDir, err := serviceUnitDir(home)
+	if err != nil {
+		return Paths{}, err
 	}
 	runDir := filepath.Join(configDir, "run")
 	return Paths{
@@ -73,8 +91,8 @@ func Resolve(configOverride string) (Paths, error) {
 		Lock:          filepath.Join(runDir, "daemon.lock"),
 		State:         filepath.Join(runDir, "daemon.json"),
 		Registry:      filepath.Join(configDir, "registry.json"),
-		Plist:         filepath.Join(launchAgentsDir, LaunchdLabel+".plist"),
-		WatchdogPlist: filepath.Join(launchAgentsDir, WatchdogLaunchdLabel+".plist"),
+		ServiceUnit:   filepath.Join(unitDir, serviceUnitName(Label)),
+		WatchdogUnit:  filepath.Join(unitDir, serviceUnitName(WatchdogLabel)),
 	}, nil
 }
 

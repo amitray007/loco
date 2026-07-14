@@ -128,7 +128,7 @@ func testPaths(t *testing.T) paths.Paths {
 		Lock:        filepath.Join(root, "run", "daemon.lock"),
 		State:       filepath.Join(root, "run", "daemon.json"),
 		Registry:    filepath.Join(root, "registry.json"),
-		Plist:       filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
+		ServiceUnit: filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }
 

@@ -1,3 +1,5 @@
+//go:build darwin
+
 package launchd
 
 import (
@@ -32,7 +34,7 @@ func Install(ctx context.Context, runner Runner, p paths.Paths, executable strin
 	if err := p.EnsureRuntimeDirs(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(p.Plist), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.Plist()), 0o755); err != nil {
 		return InstallResult{}, fmt.Errorf("create LaunchAgents directory: %w", err)
 	}
 	executable, err := filepath.Abs(executable)
@@ -41,11 +43,11 @@ func Install(ctx context.Context, runner Runner, p paths.Paths, executable strin
 	}
 
 	domain := "gui/" + strconv.Itoa(os.Getuid())
-	changed, err := installOne(ctx, runner, domain, paths.LaunchdLabel, p.Plist, RenderPlist(executable, p))
+	changed, err := installOne(ctx, runner, domain, paths.LaunchdLabel, p.Plist(), RenderPlist(executable, p))
 	if err != nil {
 		return InstallResult{}, err
 	}
-	watchdogChanged, err := installOne(ctx, runner, domain, paths.WatchdogLaunchdLabel, p.WatchdogPlist, RenderWatchdogPlist(executable, p))
+	watchdogChanged, err := installOne(ctx, runner, domain, paths.WatchdogLaunchdLabel, p.WatchdogPlist(), RenderWatchdogPlist(executable, p))
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -59,7 +61,7 @@ func Install(ctx context.Context, runner Runner, p paths.Paths, executable strin
 func Uninstall(ctx context.Context, runner Runner, p paths.Paths) (bool, error) {
 	domain := "gui/" + strconv.Itoa(os.Getuid())
 	removed := false
-	for _, item := range []struct{ label, path string }{{paths.WatchdogLaunchdLabel, p.WatchdogPlist}, {paths.LaunchdLabel, p.Plist}} {
+	for _, item := range []struct{ label, path string }{{paths.WatchdogLaunchdLabel, p.WatchdogPlist()}, {paths.LaunchdLabel, p.Plist()}} {
 		exists, err := uninstallOne(ctx, runner, domain, item.label, item.path)
 		if err != nil {
 			return false, err

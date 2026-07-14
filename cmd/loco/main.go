@@ -19,9 +19,9 @@ import (
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/events"
-	"github.com/amitray007/loco/internal/launchd"
 	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/platform"
 	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
 	"github.com/amitray007/loco/internal/watchdog"
@@ -148,15 +148,16 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			fmt.Fprintf(stderr, "locate loco executable: %v\n", err)
 			return 2
 		}
-		result, err := launchd.Install(context.Background(), launchd.OSRunner{}, p, executable)
+		action, err := platform.Manager().Install(context.Background(), p, executable)
 		if err != nil {
 			fmt.Fprintf(stderr, "install daemon: %v\n", err)
 			return 2
 		}
-		// launchctl returns before the daemon has created its socket; wait (bounded) so
-		// a caller scripting `install && status` doesn't hit a spurious "not running".
+		// The service manager returns before the daemon has created its socket; wait
+		// (bounded) so a caller scripting `install && status` doesn't hit a spurious
+		// "not running".
 		awaitDaemonReady(p.Socket, 5*time.Second)
-		fmt.Fprintf(stdout, "daemon %s (%s)\n", result.Action, p.Plist)
+		fmt.Fprintf(stdout, "daemon %s (%s)\n", action, p.ServiceUnit)
 		return 0
 
 	case "uninstall":
@@ -164,7 +165,7 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			fmt.Fprintln(stderr, "usage: loco daemon uninstall")
 			return 1
 		}
-		removed, err := launchd.Uninstall(context.Background(), launchd.OSRunner{}, p)
+		removed, err := platform.Manager().Uninstall(context.Background(), p)
 		if err != nil {
 			fmt.Fprintf(stderr, "uninstall daemon: %v\n", err)
 			return 2
@@ -812,8 +813,8 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		name string
 		path string
 	}{
-		{name: "launchd-daemon", path: p.Plist},
-		{name: "launchd-watchdog", path: p.WatchdogPlist},
+		{name: "service-unit", path: p.ServiceUnit},
+		{name: "watchdog-unit", path: p.WatchdogUnit},
 	} {
 		info, err := os.Stat(item.path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -822,7 +823,7 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			add(item.name, "fail", err.Error())
 		} else if !info.Mode().IsRegular() {
 			add(item.name, "fail", "plist path is not a regular file: "+item.path)
-		} else if exe := plistExecutable(item.path); exe != "" {
+		} else if exe := serviceUnitExecutable(item.path); exe != "" {
 			if _, statErr := os.Stat(exe); statErr != nil {
 				add(item.name, "warn", fmt.Sprintf("plist references a missing executable: %s", exe))
 			} else {
@@ -938,35 +939,6 @@ func splitPositionals(args []string) (positionals, flagArgs []string) {
 		positionals = append(positionals, arg)
 	}
 	return positionals, flagArgs
-}
-
-// plistExecutable extracts ProgramArguments[0] (the executable path) from a launchd
-// plist so doctor can verify it still exists. Returns "" if it can't be located.
-func plistExecutable(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	text := string(data)
-	arrayStart := strings.Index(text, "<array>")
-	if arrayStart < 0 {
-		return ""
-	}
-	rest := text[arrayStart:]
-	open := strings.Index(rest, "<string>")
-	if open < 0 {
-		return ""
-	}
-	rest = rest[open+len("<string>"):]
-	close := strings.Index(rest, "</string>")
-	if close < 0 {
-		return ""
-	}
-	value := rest[:close]
-	value = strings.ReplaceAll(value, "&amp;", "&")
-	value = strings.ReplaceAll(value, "&lt;", "<")
-	value = strings.ReplaceAll(value, "&gt;", ">")
-	return value
 }
 
 // waitForDaemon polls the daemon status until it responds healthy or the deadline
