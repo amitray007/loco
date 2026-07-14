@@ -152,3 +152,68 @@ cadence/blast radius, disjoint dependencies. pm integrates as a CONSUMER —
 its TUI grows a jobs pane reading loco's records per project (Phase 3), and
 loco reads pm's projects.json for project scoping. Env injection may reuse
 pm env's store read-only.
+
+## Addendum (post-ideation, 2026-07-14)
+
+### Harness-agnostic by contract
+loco is a protocol (verbs + JSON schemas + file layouts — see docs/cli.md),
+not a Claude Code accessory. Integrations are ADAPTERS on a capability ladder:
+tier 0 CLI+files (universal), tier 1 MCP server, tier 2 lifecycle hooks,
+tier 3 live channel push. Invariant: files are the truth; tiers only change
+latency — degradation can never lose or corrupt data. `loco onboard` makes the
+tool self-describing (emits/installs usage instructions into AGENTS.md/
+CLAUDE.md); `loco hello` is the universal agent bootstrap (identity, reply
+topic, pending-work briefing).
+
+### The broker tier (agents delegate to loco)
+Beyond declared jobs, agents submit work: `run` (durable background execution
+with reply-topic routing), `watch`, `timer`, `cache exec`, `lock`, `state`.
+Multi-agent concurrency = per-requester reply topics + per-consumer cursors;
+orphaned results persist and surface in recap. SECURITY: manifest-declared
+commands are pre-trusted (human-reviewed); ad-hoc `run` obeys per-project
+policy (allowlist / pending-approval + notify) — loco extends human
+delegation, never bypasses harness permission systems.
+
+### Division of labor vs Claude-native (stress-tested)
+Shift to loco: durable schedules, background execution, watching, cross-
+session/agent messaging, shared state/locks/caches — everything that must
+outlive a session or touch local resources. Keep Claude-native: judgment
+(skills/KB), live in-session orchestration (teammates), ad-hoc in-session
+watching (Monitor), and OFF-LAPTOP scheduled cognition (cloud routines/
+RemoteTrigger — loco is laptop-bound by design and does not compete there).
+
+### Dynamic jobs, identity, and topic modes (agent-manner additions)
+- **Dynamic creation**: `svc add`/`cron add` work on the fly — no manifest
+  required. Dynamic jobs carry provenance (owner agent, session, reason) and
+  a TTL lease; they expire unless renewed or `jobs promote`d into the
+  manifest (which then goes through code review). Spike-then-formalize,
+  made mechanical. `recap` surfaces expiring/orphaned dynamic jobs.
+- **Identity & succession**: `hello --agent <role>` — the ROLE owns cursors,
+  reply topic, dynamic jobs, and pending work; sessions are incarnations
+  that inherit. Agents are mortal; roles are not.
+- **Topic modes**: broadcast (per-consumer cursors, everyone sees all) vs
+  queue (claim-once with leases — exactly one consumer handles each event;
+  crashed claimants' leases expire back to the queue).
+- **Tenancy & ergonomics**: owner-namespaced everything, per-owner rate/
+  creation caps, sub-100ms calls, machine-actionable errors. See
+  docs/cli.md "Agent-ergonomics guarantees".
+
+### Phasing update
+Phase 2 = the contract (events with topic modes, status/recap,
+hello/onboard, dynamic svc/cron add + promote) as tier 0/1 (CLI + MCP serve)
++ **loco-plugin v1 with the CHANNEL adapter as the flagship deliverable** —
+proactively telling live sessions what loco found is the point of the
+product; hooks/CLI remain the lossless floor beneath it — + pr-watch
+conversion. Phase 3 = the broker tier (run/watch/timer/cache/lock/state) +
+`loco ui` — an **OpenTUI dashboard** (TypeScript, beside the plugin, same
+JSON contract): jobs / events / runs / recap panes plus the APPROVALS queue
+for policy-gated agent runs (the primary human interaction surface — humans
+visit the dashboard; only notify interrupts them) + Stop-hook drain +
+pm jobs pane (slim embed) + Slack notify.
+
+### Kill criteria (re-check at end of Phase 2)
+(a) Anthropic ships durable LOCAL background execution with records, or a
+cross-session event bus → loco's core shrinks to manifests+records+adapters.
+(b) Channels graduate from research preview with delivery guarantees →
+tier-3 becomes default, hooks tier optional. (c) A month in, recap shows loco
+supervising only one service → platform framing was premature.
