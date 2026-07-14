@@ -60,3 +60,11 @@ func TestConfigDirTildeExpands(t *testing.T) {
 		t.Fatalf("bare ~ not expanded: got %s want %s", bare.ConfigDir, home)
 	}
 }
+
+// A control character in the config dir is rejected at resolution (consistent guard
+// across all commands, not just Install).
+func TestResolveRejectsControlCharConfigDir(t *testing.T) {
+	if _, err := Resolve("/tmp/x\ninjected"); err == nil {
+		t.Fatal("expected control-char config dir to be rejected")
+	}
+}

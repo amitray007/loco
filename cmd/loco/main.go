@@ -865,6 +865,12 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--wait [--timeout D]] [--json]")
 			return 1
 		}
+		if *wait && *limit == 0 {
+			// --wait for events but --limit 0 (return none) is contradictory and would
+			// block for the whole timeout while data sits unread.
+			fmt.Fprintln(stderr, "--wait requires a positive --limit")
+			return 1
+		}
 		result, err := readEvents(p.Socket, topic, *cursor, *limit, *wait, *waitTimeout)
 		if err != nil {
 			fmt.Fprintf(stderr, "read events: %v\n", err)

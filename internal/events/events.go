@@ -266,7 +266,10 @@ func (s *Store) Peek(topic string, tail int, fromSeq uint64) (ReadResult, error)
 	if err := validateComponent("topic", topic); err != nil {
 		return ReadResult{}, err
 	}
-	if tail <= 0 {
+	if tail < 0 {
+		return ReadResult{}, errors.New("tail cannot be negative")
+	}
+	if tail == 0 {
 		tail = 20
 	}
 	if tail > 1000 {

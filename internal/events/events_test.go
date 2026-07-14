@@ -540,3 +540,12 @@ func TestPeekCreatesNoCursor(t *testing.T) {
 		t.Fatalf("peek from-seq = %+v", fromRes.Events)
 	}
 }
+
+// Peek rejects a negative tail (consistent with Read's negative-limit guard).
+func TestPeekRejectsNegativeTail(t *testing.T) {
+	store := testStore(t)
+	store.Emit(EmitInput{Topic: "t", ID: "a", Payload: json.RawMessage(`{}`)})
+	if _, err := store.Peek("t", -5, 0); err == nil {
+		t.Fatal("expected negative tail to be rejected")
+	}
+}

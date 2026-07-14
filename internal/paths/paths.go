@@ -68,6 +68,11 @@ func Resolve(configOverride string) (Paths, error) {
 		// directory literally named "~" under the current directory.
 		configDir = filepath.Join(home, configDir[2:])
 	}
+	// Reject control characters up front so every command fails fast and consistently,
+	// rather than materializing dirs / a socket path with an embedded newline.
+	if strings.ContainsAny(configDir, "\n\r\x00") {
+		return Paths{}, fmt.Errorf("config dir contains a control character: %q", configDir)
+	}
 	configDir, err = filepath.Abs(configDir)
 	if err != nil {
 		return Paths{}, fmt.Errorf("make config path absolute: %w", err)
