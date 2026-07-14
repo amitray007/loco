@@ -90,3 +90,13 @@ func TestInstallWritesUnitsAndEnables(t *testing.T) {
 		t.Fatalf("expected reload + 2 enables, got reload=%d enable=%d", reloaded, enabled)
 	}
 }
+
+// Install refuses a path containing a control character (unit-directive injection guard).
+func TestInstallRejectsControlCharInPath(t *testing.T) {
+	p := testPaths(t)
+	runner := &fakeRunner{}
+	_, err := Install(context.Background(), runner, p, "/usr/local/bin/lo\nco")
+	if err == nil || !strings.Contains(err.Error(), "control character") {
+		t.Fatalf("expected control-char rejection, got: %v", err)
+	}
+}

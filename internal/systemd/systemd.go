@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/amitray007/loco/internal/atomicfile"
 	"github.com/amitray007/loco/internal/paths"
 )
 
@@ -41,6 +42,13 @@ func Install(ctx context.Context, runner Runner, p paths.Paths, executable strin
 	executable, err := filepath.Abs(executable)
 	if err != nil {
 		return "", fmt.Errorf("make executable path absolute: %w", err)
+	}
+	// Reject control characters in any path interpolated into a unit file — a newline
+	// would let a path inject unit directives, and systemd treats '%' as a specifier.
+	for _, v := range []string{executable, p.ConfigDir, p.LogDir} {
+		if strings.ContainsAny(v, "\n\r\x00") {
+			return "", fmt.Errorf("path contains a control character, refusing to write unit: %q", v)
+		}
 	}
 
 	timerPath := timerPathFor(p.WatchdogUnit)
@@ -108,7 +116,7 @@ func writeUnit(path string, content []byte) (bool, error) {
 	if readErr == nil && bytes.Equal(current, content) {
 		return false, nil
 	}
-	if err := writeAtomic(path, content, 0o644); err != nil {
+	if err := atomicfile.Write(path, content, 0o644); err != nil {
 		return false, fmt.Errorf("write unit %s: %w", path, err)
 	}
 	return true, nil
@@ -188,29 +196,4 @@ func commandError(action string, output []byte, err error) error {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	return fmt.Errorf("%s: %w: %s", action, err, detail)
-}
-
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".loco-unit-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

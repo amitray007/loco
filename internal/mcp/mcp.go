@@ -102,23 +102,25 @@ func Serve(ctx context.Context, socket string, in io.Reader, out io.Writer) erro
 func ServeVersion(ctx context.Context, socket, version string, in io.Reader, out io.Writer) error {
 	s := &server{socket: socket, version: version, out: bufio.NewWriter(out)}
 
-	scanner := bufio.NewScanner(in)
-	// MCP payloads (tool results, registry documents) can exceed the default 64KiB
-	// token limit; allow generous per-line buffering.
-	scanner.Buffer(make([]byte, 64*1024), 16<<20)
-
-	for scanner.Scan() {
+	// Use a Reader (not a Scanner) so an oversized frame cannot permanently wedge the
+	// session: Scanner returns ErrTooLong past its cap and stops forever, whereas
+	// ReadBytes reads a full line of any length and keeps the loop alive.
+	reader := bufio.NewReader(in)
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		line := scanner.Bytes()
-		// Skip blank lines some clients emit between messages.
-		if len(trimSpace(line)) == 0 {
-			continue
+		line, err := reader.ReadBytes('\n')
+		if len(trimSpace(line)) > 0 {
+			s.handleLine(ctx, line)
 		}
-		s.handleLine(ctx, line)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
 	}
-	return scanner.Err()
 }
 
 // trimSpace avoids importing bytes/strings just for whitespace trimming of a line.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -308,5 +309,25 @@ func TestToolsCallUnknownToolIsMCPError(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected isError=true for an unknown tool")
+	}
+}
+
+// An oversized line must not permanently wedge the session: the server reports a parse
+// error and still processes the next valid request (regression: bufio.Scanner ErrTooLong
+// used to terminate Serve).
+func TestOversizedLineDoesNotWedgeSession(t *testing.T) {
+	huge := strings.Repeat("x", 20_000_000)
+	input := huge + "\n" + `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n"
+	var out bytes.Buffer
+	if err := ServeVersion(context.Background(), "/nonexistent.sock", "test", strings.NewReader(input), &out); err != nil {
+		t.Fatalf("serve returned error: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected 2 responses (parse error + initialize), got %d: %q", len(lines), out.String())
+	}
+	// The last response must be the successful initialize.
+	if !strings.Contains(lines[len(lines)-1], `"serverInfo"`) {
+		t.Fatalf("session did not recover; last line: %s", lines[len(lines)-1])
 	}
 }

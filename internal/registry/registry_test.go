@@ -129,3 +129,17 @@ func TestDeleteRemovesJobAndIsIdempotent(t *testing.T) {
 		t.Fatal("delete did not persist")
 	}
 }
+
+// ValidName rejects traversal/control names used to guard runs/logs path joins.
+func TestValidName(t *testing.T) {
+	for _, ok := range []string{"job1", "my.job", "a-b_c", "J"} {
+		if !ValidName(ok) {
+			t.Fatalf("%q should be valid", ok)
+		}
+	}
+	for _, bad := range []string{"../etc", "a/b", "", ".hidden", "a b"} {
+		if ValidName(bad) {
+			t.Fatalf("%q should be invalid", bad)
+		}
+	}
+}

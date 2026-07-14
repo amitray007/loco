@@ -260,22 +260,34 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 	cmd := exec.CommandContext(runCtx, spec.Command[0], spec.Command[1:]...)
 	// Own a process group so a timeout kills the whole tree, not just the shell.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// On timeout/cancel, escalate SIGTERM -> SIGKILL to the group instead of the
-	// default single-process SIGKILL, so grandchildren are reaped too.
+	// killGroupOnce guards the escalation timer so it fires at most once and never after
+	// Run() returns (which would risk SIGKILLing a recycled pgid).
+	var killTimer *time.Timer
+	// On timeout/cancel, escalate SIGTERM -> SIGKILL to the group instead of the default
+	// single-process SIGKILL, so grandchildren are reaped too. The escalation timer is
+	// stopped as soon as Run returns.
 	cmd.Cancel = func() error {
 		pgid := cmd.Process.Pid
 		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-		time.AfterFunc(timeoutKillGrace, func() {
+		killTimer = time.AfterFunc(timeoutKillGrace, func() {
 			if syscall.Kill(-pgid, 0) == nil {
 				_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			}
 		})
 		return nil
 	}
+	// WaitDelay bounds Wait itself: if the child is killed but a surviving grandchild
+	// still holds the inherited stdout/stderr pipe, Go force-closes the descriptors and
+	// reaps after this delay. Without it, Wait (and the deferred lock release) could
+	// block forever — the exact failure the timeout exists to prevent.
+	cmd.WaitDelay = timeoutKillGrace + time.Second
 	cmd.Stdout, cmd.Stderr = outCap, errCap
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = childEnv(spec.Env, spec.PassthroughEnv)
 	err := cmd.Run()
+	if killTimer != nil {
+		killTimer.Stop() // don't let the escalation fire against a recycled pgid
+	}
 	switch {
 	case err == nil:
 		record.Status = "success"

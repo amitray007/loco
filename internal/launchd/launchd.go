@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/amitray007/loco/internal/atomicfile"
 	"github.com/amitray007/loco/internal/paths"
 )
 
@@ -78,7 +79,7 @@ func installOne(ctx context.Context, runner Runner, domain, label, plistPath str
 		return false, fmt.Errorf("read existing plist: %w", readErr)
 	}
 	if changed {
-		if err := writeAtomic(plistPath, desired, 0o644); err != nil {
+		if err := atomicfile.Write(plistPath, desired, 0o644); err != nil {
 			return false, fmt.Errorf("write plist: %w", err)
 		}
 	}
@@ -120,6 +121,24 @@ func uninstallOne(ctx context.Context, runner Runner, domain, label, plistPath s
 	return exists || loaded, nil
 }
 
+// escapeXML escapes the characters that are special in plist <string> element text.
+func escapeXML(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func RenderPlist(executable string, p paths.Paths) []byte {
 	values := map[string]string{
 		"executable": executable,
@@ -127,22 +146,7 @@ func RenderPlist(executable string, p paths.Paths) []byte {
 		"stdout":     filepath.Join(p.LogDir, "daemon.stdout.log"),
 		"stderr":     filepath.Join(p.LogDir, "daemon.stderr.log"),
 	}
-	escape := func(value string) string {
-		var b strings.Builder
-		for _, r := range value {
-			switch r {
-			case '&':
-				b.WriteString("&amp;")
-			case '<':
-				b.WriteString("&lt;")
-			case '>':
-				b.WriteString("&gt;")
-			default:
-				b.WriteRune(r)
-			}
-		}
-		return b.String()
-	}
+	escape := escapeXML
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -173,22 +177,7 @@ func RenderPlist(executable string, p paths.Paths) []byte {
 }
 
 func RenderWatchdogPlist(executable string, p paths.Paths) []byte {
-	escape := func(value string) string {
-		var b strings.Builder
-		for _, r := range value {
-			switch r {
-			case '&':
-				b.WriteString("&amp;")
-			case '<':
-				b.WriteString("&lt;")
-			case '>':
-				b.WriteString("&gt;")
-			default:
-				b.WriteRune(r)
-			}
-		}
-		return b.String()
-	}
+	escape := escapeXML
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -217,29 +206,4 @@ func commandError(action string, output []byte, err error) error {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	return fmt.Errorf("%s: %w: %s", action, err, detail)
-}
-
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".loco-plist-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

@@ -142,6 +142,11 @@ func (s *Store) Snapshot() Document {
 	return cloneDocument(s.doc)
 }
 
+// ValidName reports whether name is a well-formed job name (letters, digits, dots,
+// underscores, hyphens; 1-128 chars). Callers that turn a job name into a filesystem
+// path (runs/logs) use this to reject traversal (e.g. "../x") before joining.
+func ValidName(name string) bool { return namePattern.MatchString(name) }
+
 func Validate(input PutInput) error {
 	if !namePattern.MatchString(input.Name) {
 		return fmt.Errorf("invalid job name %q: use 1-128 letters, digits, dots, underscores, or hyphens", input.Name)

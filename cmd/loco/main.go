@@ -1246,6 +1246,10 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 1
 	}
 	job := args[0]
+	if !registry.ValidName(job) {
+		fmt.Fprintf(stderr, "invalid job name %q\n", job)
+		return 1
+	}
 	flags := flag.NewFlagSet("runs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	last := flags.Int("last", 20, "show the most recent N runs")
@@ -1272,7 +1276,11 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		}
 		records = kept
 	}
-	if len(records) > *last {
+	if *last < 0 {
+		fmt.Fprintln(stderr, "--last cannot be negative")
+		return 1
+	}
+	if *last > 0 && len(records) > *last {
 		records = records[len(records)-*last:]
 	}
 	if globalJSON || *jsonFlag {
@@ -1304,6 +1312,10 @@ func runLogs(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 1
 	}
 	job := args[0]
+	if !registry.ValidName(job) {
+		fmt.Fprintf(stderr, "invalid job name %q\n", job)
+		return 1
+	}
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	runID := flags.String("run", "", "run ID (default: most recent run)")
