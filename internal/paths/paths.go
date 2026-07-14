@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const LaunchdLabel = "com.amitray007.loco"
@@ -42,6 +43,12 @@ func Resolve(configOverride string) (Paths, error) {
 		} else {
 			configDir = filepath.Join(home, ".config", "loco")
 		}
+	} else if configDir == "~" {
+		configDir = home
+	} else if strings.HasPrefix(configDir, "~/") {
+		// Expand a leading ~ so a quoted or unexpanded tilde does not create a stray
+		// directory literally named "~" under the current directory.
+		configDir = filepath.Join(home, configDir[2:])
 	}
 	configDir, err = filepath.Abs(configDir)
 	if err != nil {

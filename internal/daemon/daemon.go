@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -145,10 +146,17 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	}
 }
 
+// maxRequestBytes caps a single RPC request body so one socket-local client cannot
+// exhaust daemon memory with an unbounded JSON payload. The largest legitimate body is
+// an event emit, itself capped at 1 MiB; 2 MiB leaves headroom for envelope overhead.
+const maxRequestBytes = 2 << 20
+
 func serveConnection(conn net.Conn, state runtimeState, started time.Time, p paths.Paths, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store, notifier *notification.Manager) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	reader := bufio.NewReader(conn)
+	// Bound the whole connection: the command word plus its JSON body may not exceed
+	// the request cap.
+	reader := bufio.NewReader(io.LimitReader(conn, maxRequestBytes))
 	command, err := reader.ReadString('\n')
 	if err != nil {
 		return
@@ -259,7 +267,9 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return
 		}
-		_, _ = eventStore.Compact(request.Topic)
+		// Compaction is O(n) in topic size; running it on every ack made ack latency
+		// grow linearly with history. It now runs only on the 6-hour maintenance loop
+		// (and CompactAll at startup), keeping ack cheap.
 		_ = encoder.Encode(result)
 	case "notify.send":
 		var input notification.Input

@@ -99,3 +99,27 @@ func TestNotificationAppleScriptCompiles(t *testing.T) {
 		t.Fatalf("compile: %v: %s", err, data)
 	}
 }
+
+// F-05: SenderForChannel("file") writes to the alerts log instead of shelling out to
+// osascript, so the watchdog can run headless without posting real banners.
+func TestFileSenderWritesToAlertsNotDesktop(t *testing.T) {
+	alerts := filepath.Join(t.TempDir(), "alerts.jsonl")
+	sender := SenderForChannel("file", alerts)
+	if _, ok := sender.(FileSender); !ok {
+		t.Fatalf("file channel returned %T, want FileSender", sender)
+	}
+	if err := sender.Send(context.Background(), "title", "body"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(alerts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"title":"title"`) || !strings.Contains(string(data), `"channel":"file"`) {
+		t.Fatalf("alert not written to file channel: %s", data)
+	}
+	// Default channel must be the desktop sender.
+	if _, ok := SenderForChannel("macos", alerts).(MacSender); !ok {
+		t.Fatal("default channel should be MacSender")
+	}
+}

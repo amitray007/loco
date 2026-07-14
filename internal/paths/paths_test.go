@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -20,5 +21,29 @@ func TestResolveUsesExplicitConfigDirectory(t *testing.T) {
 	}
 	if filepath.Base(p.Plist) != LaunchdLabel+".plist" {
 		t.Fatalf("Plist = %q", p.Plist)
+	}
+}
+
+// F-22: a leading ~ in --config-dir expands to the home directory instead of creating a
+// stray literal "~" directory.
+func TestConfigDirTildeExpands(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Resolve("~/loco-tilde-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "loco-tilde-test")
+	if p.ConfigDir != want {
+		t.Fatalf("tilde not expanded: got %s want %s", p.ConfigDir, want)
+	}
+	bare, err := Resolve("~")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.ConfigDir != home {
+		t.Fatalf("bare ~ not expanded: got %s want %s", bare.ConfigDir, home)
 	}
 }

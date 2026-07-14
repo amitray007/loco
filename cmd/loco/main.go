@@ -153,6 +153,9 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			fmt.Fprintf(stderr, "install daemon: %v\n", err)
 			return 2
 		}
+		// launchctl returns before the daemon has created its socket; wait (bounded) so
+		// a caller scripting `install && status` doesn't hit a spurious "not running".
+		awaitDaemonReady(p.Socket, 5*time.Second)
 		fmt.Fprintf(stdout, "daemon %s (%s)\n", result.Action, p.Plist)
 		return 0
 
@@ -221,13 +224,17 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco daemon watchdog [--threshold N]")
 			return 1
 		}
 		checker := func(ctx context.Context) error {
 			_, err := daemon.Status(ctx, p.Socket, 750*time.Millisecond)
 			return err
 		}
-		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, notification.MacSender{})
+		// Honor LOCO_NOTIFY_CHANNEL so the watchdog never posts a real macOS banner in
+		// a headless/CI/test context that opted into the file channel.
+		sender := notification.SenderForChannel(os.Getenv("LOCO_NOTIFY_CHANNEL"), p.Alerts)
+		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, sender)
 		if err != nil {
 			fmt.Fprintf(stderr, "watchdog check: %v\n", err)
 			return 2
@@ -379,7 +386,11 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		flags := flag.NewFlagSet("cron list", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		jsonFlag := flags.Bool("json", false, "emit JSON")
-		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+		if err := flags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco cron list [--json]")
 			return 1
 		}
 		doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
@@ -423,7 +434,11 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		flags := flag.NewFlagSet("cron run-now", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		jsonFlag := flags.Bool("json", false, "emit JSON")
-		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
 			return 1
 		}
 		result, err := daemon.CronRunNow(context.Background(), p.Socket, 2*time.Second, args[1])
@@ -493,7 +508,11 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 		flags := flag.NewFlagSet("svc list", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		jsonFlag := flags.Bool("json", false, "emit JSON")
-		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+		if err := flags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco svc list [--json]")
 			return 1
 		}
 		result, err := daemon.ServiceList(context.Background(), p.Socket, 2*time.Second)
@@ -524,7 +543,11 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 		flags := flag.NewFlagSet("svc "+args[0], flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		jsonFlag := flags.Bool("json", false, "emit JSON")
-		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 {
+			fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
 			return 1
 		}
 		result, err := daemon.ServiceControl(context.Background(), p.Socket, 2*time.Second, args[1], args[0])
@@ -766,6 +789,23 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		add("durable-stores", "fail", overviewErr.Error())
 	} else {
 		add("durable-stores", "pass", fmt.Sprintf("%d jobs, %d topics, %d recent alerts", len(overview.Jobs), len(overview.Topics), len(overview.Alerts)))
+		// Surface a stalled consumer or a corrupt topic that the count-only summary
+		// above would otherwise hide behind a green "pass".
+		stale := make([]string, 0)
+		for _, topic := range overview.Topics {
+			if topic.Error != "" {
+				stale = append(stale, fmt.Sprintf("%s: unreadable (%s)", topic.Name, topic.Error))
+				continue
+			}
+			for _, cursor := range topic.Cursors {
+				if cursor.Warning != "" {
+					stale = append(stale, fmt.Sprintf("%s/%s: %s", topic.Name, cursor.Name, cursor.Warning))
+				}
+			}
+		}
+		if len(stale) > 0 {
+			add("event-consumers", "warn", strings.Join(stale, "; "))
+		}
 	}
 
 	for _, item := range []struct {
@@ -782,6 +822,12 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			add(item.name, "fail", err.Error())
 		} else if !info.Mode().IsRegular() {
 			add(item.name, "fail", "plist path is not a regular file: "+item.path)
+		} else if exe := plistExecutable(item.path); exe != "" {
+			if _, statErr := os.Stat(exe); statErr != nil {
+				add(item.name, "warn", fmt.Sprintf("plist references a missing executable: %s", exe))
+			} else {
+				add(item.name, "pass", item.path)
+			}
 		} else {
 			add(item.name, "pass", item.path)
 		}
@@ -818,20 +864,28 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 }
 
 func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
-	if len(args) < 2 {
-		fmt.Fprintln(stderr, "usage: loco notify TITLE BODY [--channel macos|file] [--group KEY] [--json]")
-		return 1
-	}
-	title, body := args[0], args[1]
+	usage := "usage: loco notify TITLE BODY [--channel macos|file] [--group KEY] [--json]"
 	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	channel := flags.String("channel", "macos", "macos or file")
 	group := flags.String("group", "", "deduplication group")
 	jsonFlag := flags.Bool("json", false, "emit JSON")
-	if err := flags.Parse(args[2:]); err != nil {
+	// Accept the title/body positionals in any position relative to the flags, so both
+	// `notify TITLE BODY --channel file` and `notify --channel file TITLE BODY` work.
+	// stdlib flag stops at the first non-flag, so pull the positionals out first.
+	positionals, flagArgs := splitPositionals(args)
+	if err := flags.Parse(flagArgs); err != nil {
 		return 1
 	}
-	if flags.NArg() != 0 {
+	if len(positionals) != 2 || flags.NArg() != 0 {
+		fmt.Fprintln(stderr, usage)
+		return 1
+	}
+	title, body := positionals[0], positionals[1]
+	// The job-failure: group namespace is reserved for automatic failure alerts; a
+	// user group there could suppress a real operator alert.
+	if strings.HasPrefix(*group, "job-failure:") {
+		fmt.Fprintln(stderr, "group prefix \"job-failure:\" is reserved for automatic failure alerts")
 		return 1
 	}
 	result, err := daemon.Notify(context.Background(), p.Socket, 6*time.Second, notification.Input{Title: title, Body: body, Channel: *channel, Group: *group})
@@ -857,6 +911,74 @@ func effectiveVersion() string {
 		return info.Main.Version
 	}
 	return version
+}
+
+// splitPositionals separates bare positional arguments from flag arguments so a command
+// can accept its positionals before, after, or interleaved with its flags. valueFlags
+// names the flags that consume the following token as their value (bool flags do not).
+// Used by notify, whose title/body read most naturally with flags on either side.
+func notifyValueFlags() map[string]bool {
+	return map[string]bool{"channel": true, "group": true}
+}
+
+func splitPositionals(args []string) (positionals, flagArgs []string) {
+	valueFlags := notifyValueFlags()
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			flagArgs = append(flagArgs, arg)
+			name := strings.TrimLeft(arg, "-")
+			// `--flag=value` carries its own value; `--flag value` consumes the next token.
+			if !strings.Contains(name, "=") && valueFlags[name] && i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return positionals, flagArgs
+}
+
+// plistExecutable extracts ProgramArguments[0] (the executable path) from a launchd
+// plist so doctor can verify it still exists. Returns "" if it can't be located.
+func plistExecutable(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := string(data)
+	arrayStart := strings.Index(text, "<array>")
+	if arrayStart < 0 {
+		return ""
+	}
+	rest := text[arrayStart:]
+	open := strings.Index(rest, "<string>")
+	if open < 0 {
+		return ""
+	}
+	rest = rest[open+len("<string>"):]
+	close := strings.Index(rest, "</string>")
+	if close < 0 {
+		return ""
+	}
+	value := rest[:close]
+	value = strings.ReplaceAll(value, "&amp;", "&")
+	value = strings.ReplaceAll(value, "&lt;", "<")
+	value = strings.ReplaceAll(value, "&gt;", ">")
+	return value
+}
+
+// waitForDaemon polls the daemon status until it responds healthy or the deadline
+// passes. Used after install so the CLI does not return before the socket is up.
+func awaitDaemonReady(socket string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := daemon.Status(context.Background(), socket, 500*time.Millisecond); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func formatUptime(seconds int64) string {

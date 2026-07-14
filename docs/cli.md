@@ -87,7 +87,8 @@ Also the first diagnostic any agent runs before blaming its own logic.
 The one-call situational overview: daemon health, every job's state and last
 run, every topic's unread count per cursor, alerts in the last 24h.
 **Use when:** the first call of any agent iteration and any human curiosity.
-Designed to make "checking on things" cost ~200 tokens, not 70KB.
+Designed to make "checking on things" cost a few hundred tokens, not 70KB (a modest
+real workload measures ~500 tokens; it scales with the number of topics and cursors).
 
 ### `loco recap [--since 8h]`
 The same data as prose: "pr-watch dispatched twice (one approved), identity
@@ -269,9 +270,13 @@ version of the same panes.)
 2. **Sub-100ms calls; never block**: long work returns an id immediately and
    pushes the result to your reply topic.
 3. **One-call answers**: `hello`, `status`, `recap` return complete pictures.
-4. **Machine-actionable errors**: failures carry what-to-do-next text
-   (`exit 3: identity mismatch token=X expected=Y — check .mcp.json`), not
-   bare codes.
+4. **Machine-actionable errors**: failures carry what-to-do-next text in the JSON
+   payload (e.g. `{"schema_version":1,"error":"identity mismatch token=X expected=Y
+   — check .mcp.json"}` on a caller error, `exit 1`), not bare codes. Every JSON
+   payload — success or error — carries `schema_version` (rule 2 up top). The exit
+   code stays
+   within the reserved contract above (0 success / 1 caller error / 2 system
+   error); the actionable detail lives in the message, never in a new exit code.
 5. **Tenancy**: jobs/cursors/topics are owner-namespaced; per-owner rate
    limits and job-creation caps stop one runaway agent from starving the
    rest or the machine.

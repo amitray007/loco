@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -76,6 +77,8 @@ type process struct {
 	done      chan struct{}
 	nextID    func() string
 	onFailure func(string, cronjob.RunRecord)
+	writePID  func(string, pidRecord)
+	clearPID  func(string)
 
 	mu     sync.RWMutex
 	status Status
@@ -88,7 +91,71 @@ func New(store *registry.Store, p paths.Paths) *Manager {
 }
 func (m *Manager) SetFailureHandler(handler func(string, cronjob.RunRecord)) { m.onFailure = handler }
 
-func (m *Manager) Start() error { return m.Reload() }
+// pidRecord tracks a spawned child so a later daemon (after a SIGKILL that skipped
+// graceful shutdown) can find and reap the orphan instead of leaving it running and
+// spawning a duplicate.
+type pidRecord struct {
+	PID       int    `json:"pid"`
+	StartedAt string `json:"started_at"`
+	Command   string `json:"command"`
+}
+
+func (m *Manager) pidPath(name string) string {
+	return filepath.Join(m.paths.RunDir, "svc-pids", name+".json")
+}
+
+func (m *Manager) writePID(name string, rec pidRecord) {
+	path := m.pidPath(name)
+	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o600)
+}
+
+func (m *Manager) clearPID(name string) { _ = os.Remove(m.pidPath(name)) }
+
+// reconcileOrphans runs once at startup: any recorded child process group still alive
+// belongs to a previous daemon that died without cleaning up. Kill it so we do not run
+// two copies of a service after an unclean restart.
+func (m *Manager) reconcileOrphans() {
+	dir := filepath.Join(m.paths.RunDir, "svc-pids")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var rec pidRecord
+		if json.Unmarshal(data, &rec) != nil || rec.PID <= 0 {
+			_ = os.Remove(path)
+			continue
+		}
+		// Signal 0 probes existence; if the process group is alive, terminate it.
+		if syscall.Kill(-rec.PID, 0) == nil {
+			_ = syscall.Kill(-rec.PID, syscall.SIGTERM)
+			// Give it a moment, then SIGKILL any survivors.
+			time.Sleep(200 * time.Millisecond)
+			_ = syscall.Kill(-rec.PID, syscall.SIGKILL)
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func (m *Manager) Start() error {
+	m.reconcileOrphans()
+	return m.Reload()
+}
 
 func (m *Manager) Stop() {
 	if !m.stopping.CompareAndSwap(false, true) {
@@ -157,6 +224,8 @@ func (m *Manager) Reload() error {
 			},
 			status:    Status{Name: name, State: "starting", Enabled: true},
 			onFailure: m.onFailure,
+			writePID:  m.writePID,
+			clearPID:  m.clearPID,
 		}
 		m.mu.Lock()
 		m.services[name] = proc
@@ -317,9 +386,13 @@ func (p *process) run() {
 			}
 		} else {
 			p.setRunning(cmd, started)
+			pgid := cmd.Process.Pid
 			err := cmd.Wait()
-			if err != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			// Reap any grandchildren still in the group BEFORE the leader's pid can be
+			// recycled. Kill(0) confirms the group still exists; we do not blindly
+			// signal a pid that Wait may have already freed.
+			if syscall.Kill(-pgid, 0) == nil {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL)
 			}
 			_ = stdout.Close()
 			_ = stderr.Close()
@@ -372,7 +445,21 @@ func (p *process) stop() {
 	cmd := p.cmd
 	p.mu.RUnlock()
 	if cmd != nil && cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		pgid := cmd.Process.Pid
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		// Escalate to SIGKILL if the child ignores SIGTERM, so stop() cannot hang
+		// forever on an unresponsive service.
+		go func() {
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-p.done:
+			case <-timer.C:
+				if syscall.Kill(-pgid, 0) == nil {
+					_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				}
+			}
+		}()
 	}
 	p.cancel()
 	<-p.done
@@ -386,6 +473,9 @@ func (p *process) setRunning(cmd *exec.Cmd, started time.Time) {
 	p.status.StartedAt = started.Format(time.RFC3339Nano)
 	p.status.LastError = ""
 	p.mu.Unlock()
+	if p.writePID != nil {
+		p.writePID(p.name, pidRecord{PID: cmd.Process.Pid, StartedAt: started.Format(time.RFC3339Nano), Command: strings.Join(p.spec.Command, " ")})
+	}
 }
 func (p *process) setExited(code int, message string) {
 	p.mu.Lock()
@@ -394,6 +484,11 @@ func (p *process) setExited(code int, message string) {
 	p.status.LastExitCode = &code
 	p.status.LastError = message
 	p.mu.Unlock()
+	// The child is reaped; drop its pid record so a future daemon won't try to kill a
+	// stale (possibly recycled) pid.
+	if p.clearPID != nil {
+		p.clearPID(p.name)
+	}
 }
 func (p *process) setBackoff() {
 	p.mu.Lock()
@@ -451,15 +546,18 @@ func (p *process) writeRecord(id string, started, finished time.Time, exitCode i
 	}
 }
 
+// mergedEnv builds the environment for a supervised child. It deliberately does NOT
+// inherit the daemon's full environment (which may hold operator secrets); it seeds a
+// minimal, predictable base and overlays the service's declared Env.
 func mergedEnv(extra map[string]string) []string {
 	values := make(map[string]string)
-	for _, item := range os.Environ() {
-		for i := 0; i < len(item); i++ {
-			if item[i] == '=' {
-				values[item[:i]] = item[i+1:]
-				break
-			}
+	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TZ"} {
+		if value, ok := os.LookupEnv(key); ok {
+			values[key] = value
 		}
+	}
+	if values["PATH"] == "" {
+		values["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
 	}
 	for key, value := range extra {
 		values[key] = value

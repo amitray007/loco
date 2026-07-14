@@ -42,9 +42,13 @@ type EmitInput struct {
 	Payload   json.RawMessage `json:"payload"`
 }
 type EmitResult struct {
-	SchemaVersion int   `json:"schema_version"`
-	Emitted       bool  `json:"emitted"`
-	Event         Event `json:"event"`
+	SchemaVersion int  `json:"schema_version"`
+	Emitted       bool `json:"emitted"`
+	// Expired is set when the id was recognized as a duplicate but its event has been
+	// compacted away — the emit is correctly suppressed, but the original payload is
+	// no longer retained. Distinguishes a real dedup hit from a compacted one.
+	Expired bool  `json:"expired,omitempty"`
+	Event   Event `json:"event"`
 }
 type ReadResult struct {
 	SchemaVersion int     `json:"schema_version"`
@@ -78,6 +82,7 @@ type TopicStatus struct {
 	LatestSeq uint64         `json:"latest_seq"`
 	Retained  int            `json:"retained"`
 	Cursors   []CursorStatus `json:"cursors"`
+	Error     string         `json:"error,omitempty"`
 }
 
 type topicMeta struct {
@@ -85,6 +90,11 @@ type topicMeta struct {
 	NextSeq       uint64            `json:"next_seq"`
 	FloorSeq      uint64            `json:"floor_seq"`
 	IDs           map[string]uint64 `json:"ids"`
+	// Tombstones records ids whose events have been compacted away, keyed to the time
+	// they were retired. They keep idempotency durable (a retried producer still
+	// dedups) without pinning the full event, and are themselves pruned once older
+	// than the retention floor so the map cannot grow without bound.
+	Tombstones map[string]string `json:"tombstones,omitempty"`
 }
 type Cursor struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -105,15 +115,24 @@ type Alert struct {
 	Message       string `json:"message"`
 }
 
+type topicCacheEntry struct {
+	meta   topicMeta
+	events []Event
+}
+
 type Store struct {
 	root, alerts string
 	mu           sync.Mutex
 	now          func() time.Time
 	id           func() string
+	// cache holds the parsed meta+events per topic so emit/read/ack do not re-read and
+	// re-parse the entire log on every call (was O(n) per operation). Guarded by mu.
+	// Entries are appended to on emit and dropped on any rewrite/compaction.
+	cache map[string]*topicCacheEntry
 }
 
 func New(root, alerts string) *Store {
-	return &Store{root: root, alerts: alerts, now: time.Now, id: randomID}
+	return &Store{root: root, alerts: alerts, now: time.Now, id: randomID, cache: make(map[string]*topicCacheEntry)}
 }
 
 func (s *Store) Emit(input EmitInput) (EmitResult, error) {
@@ -143,6 +162,11 @@ func (s *Store) Emit(input EmitInput) (EmitResult, error) {
 		}
 		return EmitResult{SchemaVersion: SchemaVersion, Emitted: false, Event: Event{SchemaVersion: SchemaVersion, ID: input.ID, Seq: seq}}, nil
 	}
+	// The id's event has been compacted away, but idempotency still holds: suppress the
+	// re-emit and say so explicitly rather than injecting a duplicate.
+	if _, ok := meta.Tombstones[input.ID]; ok {
+		return EmitResult{SchemaVersion: SchemaVersion, Emitted: false, Expired: true, Event: Event{SchemaVersion: SchemaVersion, ID: input.ID}}, nil
+	}
 	event := Event{SchemaVersion: SchemaVersion, ID: input.ID, Seq: meta.NextSeq, Timestamp: s.now().UTC().Format(time.RFC3339Nano), SourceJob: input.SourceJob, Payload: append(json.RawMessage(nil), input.Payload...)}
 	line, err := json.Marshal(event)
 	if err != nil {
@@ -166,10 +190,19 @@ func (s *Store) Emit(input EmitInput) (EmitResult, error) {
 	if err != nil {
 		return EmitResult{}, fmt.Errorf("append event: %w", err)
 	}
+	// Durably record the new topic file / grown log before the meta references it.
+	if err := syncDir(s.root); err != nil {
+		return EmitResult{}, fmt.Errorf("sync event dir: %w", err)
+	}
 	meta.IDs[event.ID], meta.NextSeq = event.Seq, event.Seq+1
 	if err := writeJSONAtomic(s.metaPath(input.Topic), meta); err != nil {
+		// Meta is now inconsistent with the appended log; drop the cache so the next
+		// load reconciles from disk rather than trusting a stale in-memory copy.
+		s.invalidate(input.Topic)
 		return EmitResult{}, fmt.Errorf("persist topic metadata: %w", err)
 	}
+	// Keep the cache warm by appending in place instead of forcing a full re-read.
+	s.cache[input.Topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append(append([]Event(nil), existing...), event)}
 	return EmitResult{SchemaVersion: SchemaVersion, Emitted: true, Event: event}, nil
 }
 
@@ -182,12 +215,15 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 	if err := validateComponent("cursor", cursorName); err != nil {
 		return ReadResult{}, err
 	}
-	if limit <= 0 {
-		limit = 100
+	if limit < 0 {
+		return ReadResult{}, errors.New("limit cannot be negative")
 	}
 	if limit > 1000 {
 		return ReadResult{}, errors.New("limit cannot exceed 1000")
 	}
+	// limit == 0 means "no events" (the caller's budget is exhausted); it is a valid,
+	// honored request, not a request for the default page size. The CLI supplies its
+	// own default (100) for the unset case before it ever reaches the store.
 	meta, all, err := s.loadTopic(topic)
 	if err != nil {
 		return ReadResult{}, err
@@ -210,11 +246,11 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 	}
 	result := ReadResult{SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName, Events: make([]Event, 0)}
 	for _, event := range all {
+		if len(result.Events) >= limit {
+			break
+		}
 		if event.Seq > cursor.LastAckedSeq {
 			result.Events = append(result.Events, event)
-			if len(result.Events) == limit {
-				break
-			}
 		}
 	}
 	return result, nil
@@ -271,6 +307,13 @@ func (s *Store) Compact(topic string) (CompactResult, error) {
 	}
 	now := s.now().UTC()
 	result := CompactResult{SchemaVersion: SchemaVersion, Topic: topic, RetiredCursors: make([]string, 0)}
+	// A topic with no cursor at all has no consumer yet — its events are unread, not
+	// acked. Retain everything until a cursor exists so a late-wired consumer never
+	// finds its early history silently compacted away.
+	if len(cursors) == 0 {
+		sort.Strings(result.RetiredCursors)
+		return result, nil
+	}
 	minAck, haveLive := ^uint64(0), false
 	for _, cursor := range cursors {
 		activity, err := cursorActivity(cursor)
@@ -315,9 +358,37 @@ func (s *Store) Compact(topic string) (CompactResult, error) {
 		} else {
 			meta.FloorSeq = meta.NextSeq
 		}
+		// Rebuild the id->seq index over retained events only, and move the ids of
+		// dropped events into time-stamped tombstones so idempotency stays durable
+		// (a retried producer still dedups) without pinning the full event. Prune
+		// tombstones older than the retention floor so the map cannot grow unbounded.
+		retainedIDs := make(map[string]uint64, len(kept))
+		for _, event := range kept {
+			retainedIDs[event.ID] = event.Seq
+		}
+		if meta.Tombstones == nil {
+			meta.Tombstones = make(map[string]string)
+		}
+		nowStamp := now.Format(time.RFC3339Nano)
+		for id := range meta.IDs {
+			if _, stillLive := retainedIDs[id]; !stillLive {
+				meta.Tombstones[id] = nowStamp
+			}
+		}
+		for id, stamp := range meta.Tombstones {
+			ts, perr := time.Parse(time.RFC3339Nano, stamp)
+			if perr != nil || ts.Before(cutoff) {
+				delete(meta.Tombstones, id)
+			}
+		}
+		meta.IDs = retainedIDs
 		if err := writeJSONAtomic(s.metaPath(topic), meta); err != nil {
+			s.invalidate(topic)
 			return CompactResult{}, err
 		}
+		// The log and meta were rewritten out of band of the emit path; refresh the
+		// cache from the compacted state.
+		s.cache[topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append([]Event(nil), kept...)}
 	}
 	sort.Strings(result.RetiredCursors)
 	return result, nil
@@ -339,7 +410,10 @@ func (s *Store) CompactAll() ([]CompactResult, error) {
 		topic := strings.TrimSuffix(entry.Name(), ".json")
 		result, err := s.Compact(topic)
 		if err != nil {
-			return nil, err
+			// One corrupt topic must never abort startup maintenance or take down
+			// every unrelated cron job and service. Record an alert and carry on.
+			_ = s.appendAlert(Alert{SchemaVersion: SchemaVersion, ID: s.id(), Timestamp: s.now().UTC().Format(time.RFC3339Nano), Kind: "topic_unreadable", Message: fmt.Sprintf("skipped compaction of topic %s: %v", topic, err)})
+			continue
 		}
 		results = append(results, result)
 	}
@@ -365,11 +439,15 @@ func (s *Store) Overview() ([]TopicStatus, error) {
 		topic := strings.TrimSuffix(entry.Name(), ".json")
 		meta, all, err := s.loadTopic(topic)
 		if err != nil {
-			return nil, err
+			// Isolate the failure to this one topic so `status` still reports every
+			// healthy topic, job, and service during a partial-corruption incident.
+			result = append(result, TopicStatus{Name: topic, Cursors: make([]CursorStatus, 0), Error: err.Error()})
+			continue
 		}
 		cursors, err := s.loadCursors(topic)
 		if err != nil {
-			return nil, err
+			result = append(result, TopicStatus{Name: topic, Cursors: make([]CursorStatus, 0), Error: err.Error()})
+			continue
 		}
 		item := TopicStatus{Name: topic, LatestSeq: meta.NextSeq - 1, Retained: len(all), Cursors: make([]CursorStatus, 0, len(cursors))}
 		sort.Slice(cursors, func(i, j int) bool { return cursors[i].Name < cursors[j].Name })
@@ -433,7 +511,41 @@ func (s *Store) RecentAlerts(since time.Time, limit int) ([]Alert, error) {
 	return result, nil
 }
 
+// loadTopic returns the topic's meta and events, served from an in-memory cache when
+// warm. Callers receive copies so they can never mutate cached state. Must be called
+// with s.mu held.
 func (s *Store) loadTopic(topic string) (topicMeta, []Event, error) {
+	if entry, ok := s.cache[topic]; ok {
+		return cloneMeta(entry.meta), append([]Event(nil), entry.events...), nil
+	}
+	meta, events, err := s.loadTopicFromDisk(topic)
+	if err != nil {
+		return topicMeta{}, nil, err
+	}
+	s.cache[topic] = &topicCacheEntry{meta: cloneMeta(meta), events: append([]Event(nil), events...)}
+	return meta, events, nil
+}
+
+func cloneMeta(m topicMeta) topicMeta {
+	out := m
+	out.IDs = make(map[string]uint64, len(m.IDs))
+	for k, v := range m.IDs {
+		out.IDs[k] = v
+	}
+	if m.Tombstones != nil {
+		out.Tombstones = make(map[string]string, len(m.Tombstones))
+		for k, v := range m.Tombstones {
+			out.Tombstones[k] = v
+		}
+	}
+	return out
+}
+
+// invalidate drops the cached copy of a topic after its on-disk state changes out of
+// band of the incremental emit path (rewrite, compaction, meta reconciliation).
+func (s *Store) invalidate(topic string) { delete(s.cache, topic) }
+
+func (s *Store) loadTopicFromDisk(topic string) (topicMeta, []Event, error) {
 	meta := topicMeta{SchemaVersion: SchemaVersion, NextSeq: 1, FloorSeq: 1, IDs: make(map[string]uint64)}
 	if data, err := os.ReadFile(s.metaPath(topic)); err == nil {
 		if err := json.Unmarshal(data, &meta); err != nil {
@@ -478,6 +590,12 @@ func (s *Store) loadTopic(topic string) (topicMeta, []Event, error) {
 	return meta, events, nil
 }
 
+// readEventFile parses a topic log line by line. A crash or power loss mid-append
+// leaves a torn final line (partial JSON, no trailing newline); because the append
+// path fsyncs every complete record, only the very last line can be torn. We tolerate
+// exactly that case: if the final line fails to parse, we truncate it on disk and
+// return the recovered prefix so one interrupted write can never brick a topic or the
+// daemon. Any earlier corrupt line is still a hard error — that is real damage.
 func readEventFile(path string) ([]Event, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -486,35 +604,74 @@ func readEventFile(path string) ([]Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), maxPayloadBytes+64*1024)
 	result := make([]Event, 0)
 	var previous uint64
+	// Track the byte offset of the start of the current line so we can truncate a
+	// torn tail back to the last known-good record.
+	var goodOffset int64
+	torn := false
 	for scanner.Scan() {
-		var event Event
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return nil, fmt.Errorf("decode event log %s: %w", path, err)
+		raw := scanner.Bytes()
+		lineLen := int64(len(raw)) + 1 // + newline consumed by the scanner
+		// A blank/whitespace final line is a benign torn tail (partial write with no
+		// content yet). Skip it only if it is genuinely last.
+		if len(bytes.TrimSpace(raw)) == 0 {
+			if scanner.Scan() || scanner.Err() != nil {
+				file.Close()
+				return nil, fmt.Errorf("decode event log %s: unexpected blank line", path)
+			}
+			torn = true
+			break
 		}
-		if event.SchemaVersion != SchemaVersion || event.Seq == 0 || (previous > 0 && event.Seq <= previous) {
-			return nil, fmt.Errorf("invalid event sequence in %s", path)
-		}
-		if err := validateID(event.ID); err != nil {
-			return nil, fmt.Errorf("invalid event in %s: %w", path, err)
-		}
-		if !json.Valid(event.Payload) {
-			return nil, fmt.Errorf("invalid event payload in %s", path)
-		}
-		if _, err := time.Parse(time.RFC3339Nano, event.Timestamp); err != nil {
-			return nil, fmt.Errorf("invalid event timestamp in %s: %w", path, err)
+		event, perr := parseEventLine(raw, previous)
+		if perr != nil {
+			// Only the final line may be torn. If more data follows, this is
+			// corruption in the middle of the log — refuse to guess.
+			if scanner.Scan() || scanner.Err() != nil {
+				file.Close()
+				return nil, fmt.Errorf("decode event log %s: %w", path, perr)
+			}
+			torn = true
+			break
 		}
 		previous = event.Seq
+		goodOffset += lineLen
 		result = append(result, event)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	scanErr := scanner.Err()
+	file.Close()
+	if scanErr != nil && !torn {
+		return nil, scanErr
+	}
+	if torn {
+		// Repair: truncate the torn trailing bytes so the next append starts clean.
+		if err := os.Truncate(path, goodOffset); err != nil {
+			return nil, fmt.Errorf("repair torn event log %s: %w", path, err)
+		}
 	}
 	return result, nil
+}
+
+func parseEventLine(raw []byte, previous uint64) (Event, error) {
+	var event Event
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return Event{}, err
+	}
+	if event.SchemaVersion != SchemaVersion || event.Seq == 0 || (previous > 0 && event.Seq <= previous) {
+		return Event{}, errors.New("invalid event sequence")
+	}
+	if err := validateID(event.ID); err != nil {
+		return Event{}, fmt.Errorf("invalid event id: %w", err)
+	}
+	if !json.Valid(event.Payload) {
+		return Event{}, errors.New("invalid event payload")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, event.Timestamp); err != nil {
+		return Event{}, fmt.Errorf("invalid event timestamp: %w", err)
+	}
+	return event, nil
 }
 
 func (s *Store) loadCursor(topic, name string) (Cursor, bool, error) {
@@ -681,5 +838,22 @@ func writeBytesAtomic(path string, data []byte) error {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err = os.Rename(name, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so a create/rename within it is durable across a power
+// loss. Without this, a just-committed rename can silently revert on a hard crash.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }

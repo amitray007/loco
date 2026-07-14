@@ -3,7 +3,9 @@ package service
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -131,4 +133,48 @@ func serviceTestPaths(t *testing.T) paths.Paths {
 	t.Helper()
 	root := t.TempDir()
 	return paths.Paths{ConfigDir: root, RunDir: filepath.Join(root, "run"), LogDir: filepath.Join(root, "logs"), RunsDir: filepath.Join(root, "runs"), EventsDir: filepath.Join(root, "events"), Registry: filepath.Join(root, "registry.json")}
+}
+
+// F-09: an orphaned child from a previous daemon (recorded pid) must be reaped at
+// startup so we never run two copies of a service after an unclean restart.
+func TestReconcileOrphansKillsRecordedChild(t *testing.T) {
+	p := serviceTestPaths(t)
+	store, err := registry.Open(p.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a previous daemon: spawn a long-lived process in its own group and
+	// record its pid the way the supervisor would.
+	cmd := exec.Command("/bin/sh", "-c", "while :; do sleep 1; done")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	orphanPID := cmd.Process.Pid
+	go cmd.Wait() // reap when it dies so it doesn't linger as a zombie
+
+	manager := New(store, p)
+	manager.writePID("ghost", pidRecord{PID: orphanPID, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Command: "sh"})
+
+	// The orphan is alive now.
+	if syscall.Kill(orphanPID, 0) != nil {
+		t.Fatal("orphan should be alive before reconciliation")
+	}
+	manager.reconcileOrphans()
+
+	// After reconciliation it must be gone, and its pid record cleared.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(orphanPID, 0) != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if syscall.Kill(orphanPID, 0) == nil {
+		_ = syscall.Kill(-orphanPID, syscall.SIGKILL)
+		t.Fatal("orphan survived reconciliation — would run as a duplicate")
+	}
+	if _, err := os.Stat(manager.pidPath("ghost")); !os.IsNotExist(err) {
+		t.Fatal("pid record not cleared after reconciliation")
+	}
 }

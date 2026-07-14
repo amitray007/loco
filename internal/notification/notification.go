@@ -58,6 +58,24 @@ func (MacSender) Send(ctx context.Context, title, body string) error {
 	return nil
 }
 
+// FileSender writes notifications to the alerts log instead of the desktop. It lets the
+// watchdog (and any headless/CI context) honor LOCO_NOTIFY_CHANNEL=file so a background
+// health check never posts a real macOS banner or requires a GUI session.
+type FileSender struct{ AlertsPath string }
+
+func (f FileSender) Send(_ context.Context, title, body string) error {
+	return appendJSONL(f.AlertsPath, Alert{SchemaVersion: SchemaVersion, ID: fmt.Sprintf("notify-%d", time.Now().UnixNano()), Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Kind: "notification", Title: title, Message: body, Channel: "file"})
+}
+
+// SenderForChannel returns the sender matching LOCO_NOTIFY_CHANNEL semantics: "file"
+// routes to the alerts log, anything else (default) to the desktop.
+func SenderForChannel(channel, alertsPath string) Sender {
+	if channel == "file" {
+		return FileSender{AlertsPath: alertsPath}
+	}
+	return MacSender{}
+}
+
 func appleScript(title, body string) string {
 	return fmt.Sprintf(`display notification "%s" with title "%s"`, escapeAppleScript(body), escapeAppleScript(title))
 }
