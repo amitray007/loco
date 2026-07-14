@@ -44,6 +44,8 @@ survives gets promoted into code review.
 ### Dynamic job creation (agent-speed, no manifest required)
 `loco svc add <name> --cmd … [--ttl 24h] [--reason "…"]` and
 `loco cron add <name> --schedule … --cmd … [--ttl 7d] [--reason "…"]`
+(or `--once --at <ts>` for a one-shot that self-cleans — this covers durable
+future intents like loose-end nudges, absorbing the deferred `timer` verb)
 create jobs ON THE FLY. Every dynamic job carries **provenance** (owner agent
 from `hello`, session, stated reason) and a **TTL lease** — it expires unless
 renewed (`loco jobs renew`) or promoted. `recap` surfaces expiring and
@@ -117,24 +119,21 @@ report, a full pytest log — fetch the 50 lines that matter.
 ## The bus — how agents hear and speak
 
 ### `loco events emit <topic> [--data @-|'json'] [--id <dedup-id>]`
-Producers append one JSON event to a topic. `--id` makes re-emits no-ops.
+Producers submit one JSON event to a topic. `--id` makes re-emits no-ops.
 This is the ENTIRE integration burden for a producer — one line from any
-language, any script.
+language, any script. **Write path: emit talks to the daemon (unix socket);
+ONLY the daemon writes event files** — multi-process appends would interleave.
+Daemon down → emit fails loudly (exit 2); reads stay file-based regardless
+(degrades-safely invariant).
 **Use when:** pr-watch found a dispatch; the Slack poller saw a release
 thread; a conductor wants to leave work for the oncall role.
 
-### Topic modes: broadcast vs queue
-Topics are created in one of two modes (declared at first emit or in a
-manifest):
-- **broadcast** (default): every consumer has its own cursor and sees EVERY
-  event — e.g. `pr-review.dispatch` read independently by the loop, an
-  auditor, and recap.
-- **queue**: competing consumers; `loco events claim <topic> --as <agent>
-  [--lease 10m]` hands each event to exactly ONE claimant. A crashed
-  claimant's lease expires and the event returns to the queue.
-  Complete with `loco events done <topic> --id <event-id>`.
-**Use when:** broadcast for "everyone should know"; queue for "exactly one
-of you should do this" (e.g. `tasks.oncall`).
+### Topic mode (v1): broadcast
+Every consumer has its own cursor and sees EVERY event — e.g.
+`pr-review.dispatch` read independently by the loop, an auditor, and recap.
+(A competing-consumers **queue** mode with claim/lease semantics is designed
+but DEFERRED — no demonstrated racing consumers yet; the file format doesn't
+block adding it later.)
 
 ### `loco events read <topic> --cursor <name> [--limit N] [--fail-empty]`
 Non-destructive pull from a broadcast topic at a named cursor.
@@ -158,72 +157,51 @@ DHCP for agents — with **succession semantics**: the NAME (a role, e.g.
 `dev-loop`) owns the identity, the reply topic, the cursors, the dynamic
 jobs, and the pending work; each session is an *incarnation* that inherits
 all of it. `hello` returns the identity plus a briefing: unacked events,
-orphaned run results addressed to this role, expiring dynamic jobs, job
-health, and the verbs you'll need. Agents are mortal; roles are not.
+expiring dynamic jobs, job health, and the verbs you'll need. Agents are
+mortal; roles are not.
 **Use when:** the FIRST call of any session in any harness. A successor
 session picks up exactly where its predecessor died, in one round-trip.
 
-### `loco onboard [--harness claude|generic] [--install]`
-Emits loco's own usage instructions as a prompt block, tuned per harness
-capability tier; `--install` writes/refreshes the block into the files
-agents already read (AGENTS.md, CLAUDE.md). The tool carries its own manual,
-aimed at machine readers.
-**Use when:** wiring a new repo or a new harness. This is the universal
-tier-0 integration: an agent with nothing but shell access reads the
-instructions and participates correctly.
+### Onboarding (v1: static)
+loco's usage instructions exist as a copy-paste prompt block (maintained in
+these docs) for AGENTS.md/CLAUDE.md — the universal tier-0 integration: an
+agent with nothing but shell access reads it and participates correctly.
+A `loco onboard --install` verb that writes/refreshes it automatically is
+DEFERRED until repo #5 makes hand-pasting annoying.
 
 ---
 
-## The broker — capabilities agents lack under harness restrictions
+## Deferred — the broker tier (post-v1, designed but not built)
 
-### `loco run <cmd> --project <p> [--label] [--reply-to <topic>] [--ttl]`
-Delegated background execution that OUTLIVES the requesting session. Returns
-a run_id immediately; result (exit, duration, artifact ref) is emitted to the
-reply topic when done. **Policy-gated**: manifest-declared commands and
-allowlisted patterns run freely; anything else queues as pending-approval and
-notifies the human — delegation extension, never permission bypass.
-**Use when:** "run the full test suite while I keep reviewing"; a 20-minute
-mirror grep; anything you'd hesitate to run inline for time or survival
-reasons.
+Cut by the scope review (docs/scope-cut-proposal.md) pending real consumers;
+the event schema reserves reply-topic routing so these return without
+redesign:
 
-### `loco watch <cmd> --until <pattern> [--reply-to <topic>]`
-A durable monitor: run/poll a command, emit when the pattern appears,
-independent of any session's lifetime.
-**Use when:** watch a deploy finish, a CI run flip, a file appear — and
-still get the answer even if the session that asked is long gone.
+- **`loco run`** (policy-gated ad-hoc background execution + approvals) — the
+  heaviest security surface in the spec (allowlist policy engine, execution
+  outside harness permissions); the 80% case is manifest jobs + `cron run-now`.
+- **`loco watch`** — sugar over a dynamic cron that polls and emits.
+- **`loco timer`** — absorbed by `cron add --once --at`.
+- **`loco cache exec`** — file conventions suffice at laptop scale.
+- **`loco lock`** — NOTE: the "no second concurrent writer" rationale in the
+  proposal was wrong (the wok watcher clobbered a session's state merge on
+  2026-07-14); the v1 answer is cheaper: SPLIT FILE OWNERSHIP — one writer
+  per file, enforced as a convention in the pr-watch conversion. `lock`
+  returns if a genuine cross-owner writer appears.
+- **`loco state`** — a file convention until proven otherwise.
+- **Queue topic mode** (`events claim/done`, leases) — no racing consumers yet.
+- **Per-owner tenancy quotas** — single-user laptop; dynamic-job TTLs +
+  recap visibility bound runaway damage in v1.
 
-### `loco timer set --in 72h | --at <ts> --topic <t> --data <json>`
-Durable future intents: at the appointed time, loco emits the event.
-**Use when:** "if the promised follow-up issue isn't filed in 3 days, poke
-the loop" — the loose-ends pattern, generalized to anything.
-
-### `loco cache exec --key <k> --ttl 5m -- <cmd>`
-Memoized command execution shared across all consumers: within TTL, repeat
-calls return the cached result without re-running.
-**Use when:** five agents (or one agent five times) asking "CI status?"
-within minutes — one API call, protected rate limits, near-zero tokens.
-
-### `loco lock acquire | release <name> [--ttl 5m]`
-Leases for cross-session coordination over shared resources. TTL prevents a
-dead holder from wedging everyone.
-**Use when:** two sessions might merge into the same state file — the
-concurrent-writer bug class, solved as a primitive.
-
-### `loco state get | set <key> [--ns <namespace>]`
-Small shared KV for cross-session working memory.
-**Use when:** a multi-day effort needs scratch state that isn't worth a
-whole file convention.
-
----
 
 ## Adapters — the delivery ladder (thin by design)
 
 | Adapter | Tier | Adds | Notes |
 |---|---|---|---|
 | CLI + files | 0 | everything via pull | works in ANY harness that can shell out |
-| `loco mcp serve` | 1 | the verbs as native MCP tools | no Bash mediation; most modern harnesses |
-| loco-plugin hooks | 2 | SessionStart/Stop queue-drain into context | Claude Code |
-| loco-plugin channel | 3 | live push (<channel> tags) + ack reply tool | Claude Code, research preview |
+| `loco mcp serve` | 1 | the verbs as native MCP tools | DEFERRED — thin wrapper, cheap later because the CLI contract ships first |
+| loco-plugin hooks | 2 | SessionStart queue-drain into context | Claude Code, v1 |
+| loco-plugin channel | 3 | live push (<channel> tags) + ack reply tool | Claude Code, research preview, v1 flagship |
 
 Invariant across tiers: **files are the truth; tiers only change latency.**
 An agent on tier 0 sees identical data to one on tier 3, later. Falling down
@@ -233,45 +211,42 @@ the ladder can never lose or corrupt anything.
 proactively TELLING agents what it found — the loco-plugin channel server
 pushes events into live Claude Code sessions as `<channel source="loco"
 topic="…">` tags within seconds, filtered per session (your reply topic +
-subscribed shared topics), with `ack`/`claim` exposed as reply tools. Hooks
-and CLI remain the lossless floor beneath it.
+subscribed shared topics), with `ack` exposed as a reply tool. Hooks and CLI
+remain the lossless floor beneath it.
 
 ## Human surface — `loco ui` (OpenTUI dashboard)
 
-Humans shouldn't have to speak the CLI. `loco ui` launches a full-screen
-terminal dashboard built with **OpenTUI** (TypeScript — it lives in the same
-TS layer as the loco-plugin, and consumes the exact same JSON contract as
-every other consumer; the dashboard has zero private APIs).
+Humans shouldn't have to speak the CLI. `loco ui` launches a terminal
+dashboard built with **OpenTUI** (TypeScript — same layer as the loco-plugin,
+consuming the exact same JSON contract as every other consumer; zero private
+APIs).
 
-Panes:
+**v1 (slim, read-mostly — an explicit user requirement kept through the scope
+cut):**
 - **Jobs** — services/crons across projects: state, last run, restarts;
-  start/stop/restart/run-now with a keypress; dynamic jobs show owner + TTL,
+  start/stop/restart/run-now with a keypress; dynamic jobs show owner + TTL
   with one-key promote/renew/kill.
-- **Events** — live topic feed with per-cursor unread badges; inspect any
-  event's payload; see which agent claimed what.
-- **Runs & logs** — drill from a job to its run records to captured output.
-- **Approvals** — the pending-approval queue for policy-gated agent `run`
-  requests: what the agent wants to execute, why, one-key allow/deny.
-  (This is the human's most important interactive surface — it is how
-  delegation stays governed without breaking agent flow.)
 - **Recap** — the prose digest, live.
 
-**Use when:** you want eyes on the system or a decision surfaced — everything
-else should reach you via `notify` so the dashboard is a place you *visit*,
-not one you must watch. (pm's future jobs pane embeds a slim read-only
-version of the same panes.)
+**Deferred with the broker tier:** Events feed pane, Runs/logs drill-down,
+and the Approvals queue (its keystone use — approving policy-gated agent
+`run` requests — returns when `run` does).
+
+**Use when:** you want eyes on the system — everything urgent should reach
+you via `notify`, so the dashboard is a place you *visit*, not one you must
+watch. (pm's future jobs pane embeds the read-only Jobs pane.)
 
 ## Agent-ergonomics guarantees (the contract behind the contract)
 
 1. **Mortality-safe**: every operation assumes the caller may die mid-flight —
-   at-least-once delivery, explicit ack/done, idempotent creates, leases that
-   expire. A successor can always resume.
-2. **Sub-100ms calls; never block**: long work returns an id immediately and
-   pushes the result to your reply topic.
+   at-least-once delivery, explicit ack, idempotent creates, TTL leases that
+   expire. A successor can always resume. Cursors reference EVENT IDS, never
+   byte offsets, so retention compaction can't corrupt a reader's position.
+2. **Sub-100ms calls; never block**: anything long returns an id immediately.
 3. **One-call answers**: `hello`, `status`, `recap` return complete pictures.
 4. **Machine-actionable errors**: failures carry what-to-do-next text
    (`exit 3: identity mismatch token=X expected=Y — check .mcp.json`), not
    bare codes.
-5. **Tenancy**: jobs/cursors/topics are owner-namespaced; per-owner rate
-   limits and job-creation caps stop one runaway agent from starving the
-   rest or the machine.
+5. **Ownership without quotas (v1)**: jobs/cursors/topics are
+   owner-namespaced; dynamic-job TTLs + recap visibility bound runaway
+   damage. Per-owner rate limits are deferred with the broker tier.
