@@ -1,4 +1,4 @@
-loco
+/loco
 *.log
 .DS_Store
 dist/
