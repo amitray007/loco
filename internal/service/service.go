@@ -57,23 +57,25 @@ type Manager struct {
 	store *registry.Store
 	paths paths.Paths
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	reloadMu sync.Mutex
-	mu       sync.RWMutex
-	services map[string]*process
-	sequence atomic.Uint64
-	stopping atomic.Bool
+	ctx       context.Context
+	cancel    context.CancelFunc
+	reloadMu  sync.Mutex
+	mu        sync.RWMutex
+	services  map[string]*process
+	sequence  atomic.Uint64
+	stopping  atomic.Bool
+	onFailure func(string, cronjob.RunRecord)
 }
 
 type process struct {
-	name   string
-	spec   Spec
-	paths  paths.Paths
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	nextID func() string
+	name      string
+	spec      Spec
+	paths     paths.Paths
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	nextID    func() string
+	onFailure func(string, cronjob.RunRecord)
 
 	mu     sync.RWMutex
 	status Status
@@ -84,6 +86,7 @@ func New(store *registry.Store, p paths.Paths) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{store: store, paths: p, ctx: ctx, cancel: cancel, services: make(map[string]*process)}
 }
+func (m *Manager) SetFailureHandler(handler func(string, cronjob.RunRecord)) { m.onFailure = handler }
 
 func (m *Manager) Start() error { return m.Reload() }
 
@@ -152,7 +155,8 @@ func (m *Manager) Reload() error {
 			nextID: func() string {
 				return fmt.Sprintf("%s-%d-%d", time.Now().UTC().Format("20060102T150405.000000000Z"), os.Getpid(), m.sequence.Add(1))
 			},
-			status: Status{Name: name, State: "starting", Enabled: true},
+			status:    Status{Name: name, State: "starting", Enabled: true},
+			onFailure: m.onFailure,
 		}
 		m.mu.Lock()
 		m.services[name] = proc
@@ -442,6 +446,9 @@ func (p *process) writeRecord(id string, started, finished time.Time, exitCode i
 		return
 	}
 	_ = os.Rename(name, filepath.Join(dir, id+".json"))
+	if status == "failed" && p.onFailure != nil {
+		p.onFailure(p.name, record)
+	}
 }
 
 func mergedEnv(extra map[string]string) []string {

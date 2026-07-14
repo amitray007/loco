@@ -16,6 +16,7 @@ import (
 
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/events"
+	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
@@ -47,12 +48,22 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
+	notifier := notification.New(p.NotifyState, p.Alerts, notification.MacSender{})
+	automaticChannel := os.Getenv("LOCO_NOTIFY_CHANNEL")
+	if automaticChannel == "" {
+		automaticChannel = "macos"
+	}
+	failureHandler := func(name string, record cronjob.RunRecord) {
+		_, _ = notifier.Send(context.Background(), notification.Input{Title: "loco job failed", Body: fmt.Sprintf("%s exited with code %d", name, record.ExitCode), Channel: automaticChannel, Group: "job-failure:" + name})
+	}
 	cronManager := cronjob.New(registryStore, p)
+	cronManager.SetFailureHandler(failureHandler)
 	if err := cronManager.Start(); err != nil {
 		return fmt.Errorf("start cron manager: %w", err)
 	}
 	defer cronManager.Stop()
 	serviceManager := service.New(registryStore, p)
+	serviceManager.SetFailureHandler(failureHandler)
 	if err := serviceManager.Start(); err != nil {
 		return fmt.Errorf("start service manager: %w", err)
 	}
@@ -129,12 +140,12 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started, p, registryStore, cronManager, serviceManager, eventStore)
+			serveConnection(conn, state, started, p, registryStore, cronManager, serviceManager, eventStore, notifier)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time, p paths.Paths, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, p paths.Paths, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store, notifier *notification.Manager) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
@@ -249,6 +260,18 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			return
 		}
 		_, _ = eventStore.Compact(request.Topic)
+		_ = encoder.Encode(result)
+	case "notify.send":
+		var input notification.Input
+		if err := json.NewDecoder(reader).Decode(&input); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode notification: " + err.Error()})
+			return
+		}
+		result, err := notifier.Send(context.Background(), input)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
 		_ = encoder.Encode(result)
 	case "registry.list":
 		_ = encoder.Encode(registryStore.Snapshot())

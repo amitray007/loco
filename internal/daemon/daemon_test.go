@@ -117,17 +117,18 @@ func testPaths(t *testing.T) paths.Paths {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	return paths.Paths{
-		ConfigDir: root,
-		RunDir:    filepath.Join(root, "run"),
-		LogDir:    filepath.Join(root, "logs"),
-		RunsDir:   filepath.Join(root, "runs"),
-		EventsDir: filepath.Join(root, "events"),
-		Alerts:    filepath.Join(root, "alerts.jsonl"),
-		Socket:    filepath.Join(root, "run", "daemon.sock"),
-		Lock:      filepath.Join(root, "run", "daemon.lock"),
-		State:     filepath.Join(root, "run", "daemon.json"),
-		Registry:  filepath.Join(root, "registry.json"),
-		Plist:     filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
+		ConfigDir:   root,
+		RunDir:      filepath.Join(root, "run"),
+		LogDir:      filepath.Join(root, "logs"),
+		RunsDir:     filepath.Join(root, "runs"),
+		EventsDir:   filepath.Join(root, "events"),
+		Alerts:      filepath.Join(root, "alerts.jsonl"),
+		NotifyState: filepath.Join(root, "notify.json"),
+		Socket:      filepath.Join(root, "run", "daemon.sock"),
+		Lock:        filepath.Join(root, "run", "daemon.lock"),
+		State:       filepath.Join(root, "run", "daemon.json"),
+		Registry:    filepath.Join(root, "registry.json"),
+		Plist:       filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }
 

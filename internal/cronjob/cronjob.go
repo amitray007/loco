@@ -55,14 +55,17 @@ type Manager struct {
 	paths     paths.Paths
 	scheduler *cronlib.Cron
 
-	mu       sync.Mutex
-	entries  []cronlib.EntryID
-	locks    map[string]*sync.Mutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	sequence atomic.Uint64
+	mu        sync.Mutex
+	entries   []cronlib.EntryID
+	locks     map[string]*sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	sequence  atomic.Uint64
+	onFailure func(string, RunRecord)
 }
+
+func (m *Manager) SetFailureHandler(handler func(string, RunRecord)) { m.onFailure = handler }
 
 func New(store *registry.Store, p paths.Paths) *Manager {
 	parser := cronlib.NewParser(cronlib.Minute | cronlib.Hour | cronlib.Dom | cronlib.Month | cronlib.Dow)
@@ -221,6 +224,9 @@ func (m *Manager) finishRecord(record *RunRecord, started time.Time) {
 	record.FinishedAt = finished.Format(time.RFC3339Nano)
 	record.DurationMS = finished.Sub(started).Milliseconds()
 	m.writeRecord(*record)
+	if record.Status == "failed" && m.onFailure != nil {
+		m.onFailure(record.Job, *record)
+	}
 }
 
 func (m *Manager) writeRecord(record RunRecord) {

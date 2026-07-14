@@ -91,17 +91,18 @@ func launchdTestPaths(t *testing.T) paths.Paths {
 	t.Helper()
 	root := t.TempDir()
 	return paths.Paths{
-		ConfigDir: filepath.Join(root, "config"),
-		RunDir:    filepath.Join(root, "config", "run"),
-		LogDir:    filepath.Join(root, "config", "logs"),
-		RunsDir:   filepath.Join(root, "config", "runs"),
-		EventsDir: filepath.Join(root, "config", "events"),
-		Alerts:    filepath.Join(root, "config", "alerts.jsonl"),
-		Socket:    filepath.Join(root, "config", "run", "daemon.sock"),
-		Lock:      filepath.Join(root, "config", "run", "daemon.lock"),
-		State:     filepath.Join(root, "config", "run", "daemon.json"),
-		Registry:  filepath.Join(root, "config", "registry.json"),
-		Plist:     filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
+		ConfigDir:   filepath.Join(root, "config"),
+		RunDir:      filepath.Join(root, "config", "run"),
+		LogDir:      filepath.Join(root, "config", "logs"),
+		RunsDir:     filepath.Join(root, "config", "runs"),
+		EventsDir:   filepath.Join(root, "config", "events"),
+		Alerts:      filepath.Join(root, "config", "alerts.jsonl"),
+		NotifyState: filepath.Join(root, "config", "notify.json"),
+		Socket:      filepath.Join(root, "config", "run", "daemon.sock"),
+		Lock:        filepath.Join(root, "config", "run", "daemon.lock"),
+		State:       filepath.Join(root, "config", "run", "daemon.json"),
+		Registry:    filepath.Join(root, "config", "registry.json"),
+		Plist:       filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/events"
 	"github.com/amitray007/loco/internal/launchd"
+	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
@@ -46,6 +47,7 @@ Usage:
   loco [--config-dir DIR] events read TOPIC --cursor NAME [--limit N]
   loco [--config-dir DIR] events ack TOPIC --cursor NAME --through ID
   loco [--config-dir DIR] status [--json]
+  loco [--config-dir DIR] notify TITLE BODY [--channel macos|file] [--group KEY]
 
 Commands:
   daemon install     Install and start the launchd service
@@ -65,6 +67,7 @@ Commands:
   events read        Read without advancing a named cursor
   events ack         Advance a cursor through an event ID
   status             Show daemon, jobs, unread cursors, and recent alerts
+  notify             Send a grouped human notification
 
 Exit codes:
   0  success
@@ -91,7 +94,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "notify" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -106,6 +109,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "status" {
 		return runStatus(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	if args[0] == "notify" {
+		return runNotify(args[1:], p, *jsonOutput, stdout, stderr)
 	}
 	if args[0] == "registry" {
 		return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
@@ -661,6 +667,38 @@ func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			}
 			fmt.Fprintln(stdout)
 		}
+	}
+	return 0
+}
+
+func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "usage: loco notify TITLE BODY [--channel macos|file] [--group KEY] [--json]")
+		return 1
+	}
+	title, body := args[0], args[1]
+	flags := flag.NewFlagSet("notify", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	channel := flags.String("channel", "macos", "macos or file")
+	group := flags.String("group", "", "deduplication group")
+	jsonFlag := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args[2:]); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		return 1
+	}
+	result, err := daemon.Notify(context.Background(), p.Socket, 6*time.Second, notification.Input{Title: title, Body: body, Channel: *channel, Group: *group})
+	if err != nil {
+		fmt.Fprintf(stderr, "send notification: %v\n", err)
+		return 2
+	}
+	if globalJSON || *jsonFlag {
+		_ = json.NewEncoder(stdout).Encode(result)
+	} else if result.Suppressed {
+		fmt.Fprintf(stdout, "notification suppressed by group %s\n", result.Group)
+	} else {
+		fmt.Fprintln(stdout, "notification delivered")
 	}
 	return 0
 }

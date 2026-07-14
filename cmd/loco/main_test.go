@@ -6,15 +6,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/events"
+	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/service"
 )
+
+func TestMain(m *testing.M) { _ = os.Setenv("LOCO_NOTIFY_CHANNEL", "file"); os.Exit(m.Run()) }
 
 func TestStatusJSON(t *testing.T) {
 	root, err := os.MkdirTemp("/tmp", "loco-cli-test-")
@@ -448,5 +452,99 @@ func TestTopLevelStatusUnavailableJSON(t *testing.T) {
 	}
 	if status.Daemon.Healthy || status.Jobs == nil || status.Topics == nil || status.Alerts == nil {
 		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestNotifyCLIUsesDurableGroupDedupe(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-notify-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "notify-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+	call := func() notification.Result {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"--config-dir", root, "notify", "Failure", "worker crashed", "--channel", "file", "--group", "worker", "--json"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		var result notification.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first, second := call(), call()
+	if !first.Delivered || !second.Suppressed {
+		t.Fatalf("first=%+v second=%+v", first, second)
+	}
+	data, err := os.ReadFile(p.Alerts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "\n") != 1 {
+		t.Fatalf("alerts=%s", data)
+	}
+}
+
+func TestCrashLoopProducesOneGroupedAlert(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-crash-alert-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "alert-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config-dir", root, "svc", "add", "crasher", "--cmd", "exit 7", "--backoff-initial", "10ms", "--backoff-max", "20ms"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	records := []string{}
+	for time.Now().Before(deadline) {
+		records, _ = filepath.Glob(filepath.Join(p.RunsDir, "crasher", "*.json"))
+		if len(records) >= 3 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(records) < 3 {
+		t.Fatalf("records=%d", len(records))
+	}
+	time.Sleep(50 * time.Millisecond)
+	data, err := os.ReadFile(p.Alerts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d alerts for crash loop: %s", len(lines), data)
+	}
+	var alert notification.Alert
+	if err := json.Unmarshal([]byte(lines[0]), &alert); err != nil {
+		t.Fatal(err)
+	}
+	if alert.Group != "job-failure:crasher" {
+		t.Fatalf("alert=%+v", alert)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--config-dir", root, "svc", "stop", "crasher"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("stop code=%d stderr=%s", code, stderr.String())
 	}
 }
