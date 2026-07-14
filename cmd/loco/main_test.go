@@ -11,6 +11,7 @@ import (
 
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
+	"github.com/amitray007/loco/internal/events"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/service"
 )
@@ -26,6 +27,8 @@ func TestStatusJSON(t *testing.T) {
 		RunDir:    filepath.Join(root, "run"),
 		LogDir:    filepath.Join(root, "logs"),
 		RunsDir:   filepath.Join(root, "runs"),
+		EventsDir: filepath.Join(root, "events"),
+		Alerts:    filepath.Join(root, "alerts.jsonl"),
 		Socket:    filepath.Join(root, "run", "daemon.sock"),
 		Lock:      filepath.Join(root, "run", "daemon.lock"),
 		State:     filepath.Join(root, "run", "daemon.json"),
@@ -289,4 +292,79 @@ func waitForServiceCLI(t *testing.T, root string, ready func(service.Status) boo
 	}
 	t.Fatal("service did not reach expected CLI state")
 	return service.Status{}
+}
+
+func TestEventsPersistAcrossDaemonRestartAndRequireExplicitAck(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-events-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "events-1") }()
+	waitForDaemon(t, p.Socket)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "events", "emit", "demo.topic", "--id", "persisted", "--data", `{"value":1}`, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("emit code=%d stderr=%s", code, stderr.String())
+	}
+	cancel()
+	<-done
+	ctx, cancel = context.WithCancel(context.Background())
+	done = make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "events-2") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+
+	read := func(cursor string) events.ReadResult {
+		stdout.Reset()
+		stderr.Reset()
+		code = run([]string{"--config-dir", root, "events", "read", "demo.topic", "--cursor", cursor, "--json"}, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("read code=%d stderr=%s", code, stderr.String())
+		}
+		var result events.ReadResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := read("c1")
+	if len(first.Events) != 1 || first.Events[0].ID != "persisted" {
+		t.Fatalf("first=%+v", first)
+	}
+	again := read("c1")
+	if len(again.Events) != 1 {
+		t.Fatal("read advanced without ack")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "events", "ack", "demo.topic", "--cursor", "c1", "--through", "persisted", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("ack code=%d stderr=%s", code, stderr.String())
+	}
+	if after := read("c1"); len(after.Events) != 0 {
+		t.Fatalf("after ack=%+v", after)
+	}
+	if other := read("c2"); len(other.Events) != 1 {
+		t.Fatalf("independent cursor=%+v", other)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "events", "emit", "demo.topic", "--id", "persisted", "--data", `{"value":999}`, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatal(stderr.String())
+	}
+	var duplicate events.EmitResult
+	if err := json.Unmarshal(stdout.Bytes(), &duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate.Emitted || duplicate.Event.Seq != 1 {
+		t.Fatalf("duplicate=%+v", duplicate)
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/amitray007/loco/internal/cronjob"
+	"github.com/amitray007/loco/internal/events"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
@@ -56,6 +57,10 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		return fmt.Errorf("start service manager: %w", err)
 	}
 	defer serviceManager.Stop()
+	eventStore := events.New(p.EventsDir, p.Alerts)
+	if _, err := eventStore.CompactAll(); err != nil {
+		return fmt.Errorf("maintain event store: %w", err)
+	}
 
 	// Only the process holding daemon.lock may remove a stale socket.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -84,6 +89,22 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err := writeJSONAtomic(p.State, state, 0o600); err != nil {
 		return fmt.Errorf("write runtime state: %w", err)
 	}
+	maintenanceCtx, stopMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-maintenanceCtx.Done():
+				return
+			case <-ticker.C:
+				_, _ = eventStore.CompactAll()
+			}
+		}
+	}()
+	defer func() { stopMaintenance(); <-maintenanceDone }()
 
 	var connections sync.WaitGroup
 	done := make(chan struct{})
@@ -108,12 +129,12 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started, registryStore, cronManager, serviceManager)
+			serveConnection(conn, state, started, registryStore, cronManager, serviceManager, eventStore)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
@@ -176,6 +197,51 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, regis
 			return
 		}
 		_ = cronManager.Reload()
+		_ = encoder.Encode(result)
+	case "events.emit":
+		var input events.EmitInput
+		if err := json.NewDecoder(reader).Decode(&input); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode event: " + err.Error()})
+			return
+		}
+		result, err := eventStore.Emit(input)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
+	case "events.read":
+		var request struct {
+			Topic  string `json:"topic"`
+			Cursor string `json:"cursor"`
+			Limit  int    `json:"limit"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode read request: " + err.Error()})
+			return
+		}
+		result, err := eventStore.Read(request.Topic, request.Cursor, request.Limit)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
+	case "events.ack":
+		var request struct {
+			Topic   string `json:"topic"`
+			Cursor  string `json:"cursor"`
+			Through string `json:"through"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode ack request: " + err.Error()})
+			return
+		}
+		result, err := eventStore.Ack(request.Topic, request.Cursor, request.Through)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_, _ = eventStore.Compact(request.Topic)
 		_ = encoder.Encode(result)
 	case "registry.list":
 		_ = encoder.Encode(registryStore.Snapshot())

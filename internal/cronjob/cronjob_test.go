@@ -113,6 +113,6 @@ func cronTestPaths(t *testing.T) paths.Paths {
 	root := t.TempDir()
 	return paths.Paths{
 		ConfigDir: root, RunDir: filepath.Join(root, "run"), LogDir: filepath.Join(root, "logs"),
-		RunsDir: filepath.Join(root, "runs"), Registry: filepath.Join(root, "registry.json"),
+		RunsDir: filepath.Join(root, "runs"), EventsDir: filepath.Join(root, "events"), Registry: filepath.Join(root, "registry.json"),
 	}
 }

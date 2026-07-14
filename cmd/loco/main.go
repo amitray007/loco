@@ -18,6 +18,7 @@ import (
 
 	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
+	"github.com/amitray007/loco/internal/events"
 	"github.com/amitray007/loco/internal/launchd"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
@@ -41,6 +42,9 @@ Usage:
   loco [--config-dir DIR] svc add NAME --cmd COMMAND
   loco [--config-dir DIR] svc list [--json]
   loco [--config-dir DIR] svc start|stop|restart NAME [--json]
+  loco [--config-dir DIR] events emit TOPIC --data JSON [--id ID]
+  loco [--config-dir DIR] events read TOPIC --cursor NAME [--limit N]
+  loco [--config-dir DIR] events ack TOPIC --cursor NAME --through ID
 
 Commands:
   daemon install     Install and start the launchd service
@@ -56,6 +60,9 @@ Commands:
   svc list           List service state, PID, and restart count
   svc start/stop     Change a service's durable desired state
   svc restart        Restart a service immediately
+  events emit        Append an idempotent event to a durable topic
+  events read        Read without advancing a named cursor
+  events ack         Advance a cursor through an event ID
 
 Exit codes:
   0  success
@@ -82,7 +89,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -101,7 +108,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "cron" {
 		return runCron(args[1:], p, *jsonOutput, stdout, stderr)
 	}
-	return runService(args[1:], p, *jsonOutput, stdout, stderr)
+	if args[0] == "svc" {
+		return runService(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	return runEvents(args[1:], p, *jsonOutput, stdout, stderr)
 }
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
@@ -490,6 +500,117 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown svc command %q\n", args[0])
+		return 1
+	}
+}
+
+func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: loco events emit|read|ack")
+		return 1
+	}
+	switch args[0] {
+	case "emit":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
+			return 1
+		}
+		topic := args[1]
+		flags := flag.NewFlagSet("events emit", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		data := flags.String("data", "", "JSON payload")
+		id := flags.String("id", "", "idempotency key")
+		source := flags.String("source-job", "", "emitting job name")
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 || *data == "" {
+			fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
+			return 1
+		}
+		if !json.Valid([]byte(*data)) {
+			fmt.Fprintln(stderr, "event data must be valid JSON")
+			return 1
+		}
+		result, err := daemon.EventsEmit(context.Background(), p.Socket, 5*time.Second, events.EmitInput{Topic: topic, ID: *id, SourceJob: *source, Payload: json.RawMessage(*data)})
+		if err != nil {
+			fmt.Fprintf(stderr, "emit event: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else if result.Emitted {
+			fmt.Fprintf(stdout, "event %s emitted on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
+		} else {
+			fmt.Fprintf(stdout, "event %s already exists on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
+		}
+		return 0
+	case "read":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--json]")
+			return 1
+		}
+		topic := args[1]
+		flags := flag.NewFlagSet("events read", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		cursor := flags.String("cursor", "", "consumer cursor")
+		limit := flags.Int("limit", 100, "maximum events")
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 || *cursor == "" {
+			fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--json]")
+			return 1
+		}
+		result, err := daemon.EventsRead(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *limit)
+		if err != nil {
+			fmt.Fprintf(stderr, "read events: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else {
+			encoder := json.NewEncoder(stdout)
+			for _, event := range result.Events {
+				_ = encoder.Encode(event)
+			}
+		}
+		return 0
+	case "ack":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			return 1
+		}
+		topic := args[1]
+		flags := flag.NewFlagSet("events ack", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		cursor := flags.String("cursor", "", "consumer cursor")
+		through := flags.String("through", "", "event ID")
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 || *cursor == "" || *through == "" {
+			fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			return 1
+		}
+		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through)
+		if err != nil {
+			fmt.Fprintf(stderr, "ack events: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else if result.Changed {
+			fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+		} else {
+			fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown events command %q\n", args[0])
 		return 1
 	}
 }

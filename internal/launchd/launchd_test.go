@@ -95,6 +95,8 @@ func launchdTestPaths(t *testing.T) paths.Paths {
 		RunDir:    filepath.Join(root, "config", "run"),
 		LogDir:    filepath.Join(root, "config", "logs"),
 		RunsDir:   filepath.Join(root, "config", "runs"),
+		EventsDir: filepath.Join(root, "config", "events"),
+		Alerts:    filepath.Join(root, "config", "alerts.jsonl"),
 		Socket:    filepath.Join(root, "config", "run", "daemon.sock"),
 		Lock:      filepath.Join(root, "config", "run", "daemon.lock"),
 		State:     filepath.Join(root, "config", "run", "daemon.json"),
