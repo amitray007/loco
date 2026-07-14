@@ -62,6 +62,10 @@ type Spec struct {
 	Command    []string          `json:"command"`
 	WorkingDir string            `json:"working_dir,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
+	// PassthroughEnv names environment variables to inherit from the daemon's own
+	// environment at spawn time. The default child env is minimal (no inherited
+	// secrets); this is the explicit opt-in for jobs that need one.
+	PassthroughEnv []string `json:"passthrough_env,omitempty"`
 }
 
 type TriggerResult struct {
@@ -225,7 +229,7 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 	cmd := exec.CommandContext(m.ctx, spec.Command[0], spec.Command[1:]...)
 	cmd.Stdout, cmd.Stderr = outCap, errCap
 	cmd.Dir = spec.WorkingDir
-	cmd.Env = childEnv(spec.Env)
+	cmd.Env = childEnv(spec.Env, spec.PassthroughEnv)
 	err := cmd.Run()
 	if err == nil {
 		record.Status = "success"
@@ -303,8 +307,9 @@ func (m *Manager) writeRecord(record RunRecord) {
 
 // childEnv builds the environment for a job command. It deliberately does NOT inherit
 // the daemon's full environment (which may hold operator secrets); it seeds a minimal,
-// predictable base and overlays the job's declared Env.
-func childEnv(extra map[string]string) []string {
+// predictable base, adds any explicitly passed-through daemon vars, then overlays the
+// job's declared Env.
+func childEnv(extra map[string]string, passthrough []string) []string {
 	base := map[string]string{}
 	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TZ"} {
 		if value, ok := os.LookupEnv(key); ok {
@@ -313,6 +318,12 @@ func childEnv(extra map[string]string) []string {
 	}
 	if base["PATH"] == "" {
 		base["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	// Explicit passthrough: inherit named vars from the daemon environment.
+	for _, key := range passthrough {
+		if value, ok := os.LookupEnv(key); ok {
+			base[key] = value
+		}
 	}
 	for key, value := range extra {
 		base[key] = value

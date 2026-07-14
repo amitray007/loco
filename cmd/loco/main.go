@@ -90,6 +90,32 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// stringList is a flag.Value that accumulates repeated flag occurrences, e.g.
+// --env A=1 --env B=2.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+// parseEnvPairs splits KEY=VALUE strings into a map, rejecting malformed entries.
+func parseEnvPairs(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		eq := strings.IndexByte(pair, '=')
+		if eq <= 0 {
+			return nil, fmt.Errorf("invalid --env %q: expected KEY=VALUE", pair)
+		}
+		out[pair[:eq]] = pair[eq+1:]
+	}
+	return out, nil
+}
+
 func run(args []string, stdout, stderr io.Writer) int {
 	global := flag.NewFlagSet("loco", flag.ContinueOnError)
 	global.SetOutput(stderr)
@@ -368,15 +394,24 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		schedule := flags.String("schedule", "", "5-field cron schedule")
 		command := flags.String("cmd", "", "shell command")
 		workingDir := flags.String("working-dir", "", "working directory")
+		var envPairs stringList
+		flags.Var(&envPairs, "env", "set an environment variable KEY=VALUE (repeatable)")
+		var passthrough stringList
+		flags.Var(&passthrough, "env-passthrough", "inherit a named var from the daemon environment (repeatable)")
 		jsonFlag := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 || *schedule == "" || *command == "" {
-			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
 			return 1
 		}
-		spec := cronjob.Spec{Schedule: *schedule, Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir}
+		env, err := parseEnvPairs(envPairs)
+		if err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return 1
+		}
+		spec := cronjob.Spec{Schedule: *schedule, Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Env: env, PassthroughEnv: passthrough}
 		data, _ := json.Marshal(spec)
 		if _, err := cronjob.DecodeSpec(data); err != nil {
 			fmt.Fprintf(stderr, "invalid cron job: %v\n", err)
@@ -535,15 +570,24 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 		workingDir := flags.String("working-dir", "", "working directory")
 		initial := flags.Duration("backoff-initial", time.Second, "initial restart delay")
 		maximum := flags.Duration("backoff-max", 30*time.Second, "maximum restart delay")
+		var envPairs stringList
+		flags.Var(&envPairs, "env", "set an environment variable KEY=VALUE (repeatable)")
+		var passthrough stringList
+		flags.Var(&passthrough, "env-passthrough", "inherit a named var from the daemon environment (repeatable)")
 		jsonFlag := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 || *command == "" {
-			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
 			return 1
 		}
-		spec := service.Spec{Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Restart: *restart, Enabled: true, BackoffInitial: initial.Milliseconds(), BackoffMax: maximum.Milliseconds()}
+		env, envErr := parseEnvPairs(envPairs)
+		if envErr != nil {
+			fmt.Fprintf(stderr, "%v\n", envErr)
+			return 1
+		}
+		spec := service.Spec{Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Env: env, PassthroughEnv: passthrough, Restart: *restart, Enabled: true, BackoffInitial: initial.Milliseconds(), BackoffMax: maximum.Milliseconds()}
 		raw, _ := json.Marshal(spec)
 		if _, err := service.DecodeSpec(raw); err != nil {
 			fmt.Fprintf(stderr, "invalid service: %v\n", err)

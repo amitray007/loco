@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestRunHistoryIsPruned(t *testing.T) {
 func TestChildEnvExcludesDaemonSecrets(t *testing.T) {
 	os.Setenv("LOCO_TEST_SECRET", "topsecret")
 	defer os.Unsetenv("LOCO_TEST_SECRET")
-	env := childEnv(map[string]string{"MY_VAR": "1"})
+	env := childEnv(map[string]string{"MY_VAR": "1"}, nil)
 	for _, kv := range env {
 		if len(kv) >= 17 && kv[:17] == "LOCO_TEST_SECRET=" {
 			t.Fatal("child env leaked the daemon secret")
@@ -215,5 +216,35 @@ func TestChildEnvExcludesDaemonSecrets(t *testing.T) {
 	}
 	if !sawMyVar || !sawPath {
 		t.Fatalf("child env missing declared var or PATH: %v", env)
+	}
+}
+
+// B1/F-18: declared --env reaches the child; --env-passthrough inherits a named daemon
+// var; unlisted daemon secrets are still excluded.
+func TestChildEnvDeclaredAndPassthrough(t *testing.T) {
+	os.Setenv("LOCO_TEST_PASS", "inherited")
+	os.Setenv("LOCO_TEST_SECRET", "should-not-leak")
+	defer os.Unsetenv("LOCO_TEST_PASS")
+	defer os.Unsetenv("LOCO_TEST_SECRET")
+
+	env := childEnv(map[string]string{"DECLARED": "yes"}, []string{"LOCO_TEST_PASS"})
+	has := func(kv string) bool {
+		for _, e := range env {
+			if e == kv {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("DECLARED=yes") {
+		t.Fatal("declared env var missing")
+	}
+	if !has("LOCO_TEST_PASS=inherited") {
+		t.Fatal("passthrough var not inherited")
+	}
+	for _, e := range env {
+		if strings.HasPrefix(e, "LOCO_TEST_SECRET=") {
+			t.Fatal("unlisted daemon secret leaked into child env")
+		}
 	}
 }

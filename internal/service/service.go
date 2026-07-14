@@ -26,6 +26,7 @@ type Spec struct {
 	Command        []string          `json:"command"`
 	WorkingDir     string            `json:"working_dir,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
+	PassthroughEnv []string          `json:"passthrough_env,omitempty"`
 	Restart        string            `json:"restart"`
 	Enabled        bool              `json:"enabled"`
 	BackoffInitial int64             `json:"backoff_initial_ms,omitempty"`
@@ -374,7 +375,7 @@ func (p *process) run() {
 		}
 		cmd := exec.CommandContext(p.ctx, p.spec.Command[0], p.spec.Command[1:]...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Dir, cmd.Stdout, cmd.Stderr, cmd.Env = p.spec.WorkingDir, stdout, stderr, mergedEnv(p.spec.Env)
+		cmd.Dir, cmd.Stdout, cmd.Stderr, cmd.Env = p.spec.WorkingDir, stdout, stderr, mergedEnv(p.spec.Env, p.spec.PassthroughEnv)
 		if err := cmd.Start(); err != nil {
 			_ = stdout.Close()
 			_ = stderr.Close()
@@ -549,7 +550,7 @@ func (p *process) writeRecord(id string, started, finished time.Time, exitCode i
 // mergedEnv builds the environment for a supervised child. It deliberately does NOT
 // inherit the daemon's full environment (which may hold operator secrets); it seeds a
 // minimal, predictable base and overlays the service's declared Env.
-func mergedEnv(extra map[string]string) []string {
+func mergedEnv(extra map[string]string, passthrough []string) []string {
 	values := make(map[string]string)
 	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TZ"} {
 		if value, ok := os.LookupEnv(key); ok {
@@ -558,6 +559,11 @@ func mergedEnv(extra map[string]string) []string {
 	}
 	if values["PATH"] == "" {
 		values["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	for _, key := range passthrough {
+		if value, ok := os.LookupEnv(key); ok {
+			values[key] = value
+		}
 	}
 	for key, value := range extra {
 		values[key] = value
