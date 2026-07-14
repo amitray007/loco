@@ -451,15 +451,18 @@ func (p *process) writeRecord(id string, started, finished time.Time, exitCode i
 	}
 }
 
+// mergedEnv builds the environment for a supervised child. It deliberately does NOT
+// inherit the daemon's full environment (which may hold operator secrets); it seeds a
+// minimal, predictable base and overlays the service's declared Env.
 func mergedEnv(extra map[string]string) []string {
 	values := make(map[string]string)
-	for _, item := range os.Environ() {
-		for i := 0; i < len(item); i++ {
-			if item[i] == '=' {
-				values[item[:i]] = item[i+1:]
-				break
-			}
+	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TZ"} {
+		if value, ok := os.LookupEnv(key); ok {
+			values[key] = value
 		}
+	}
+	if values["PATH"] == "" {
+		values["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
 	}
 	for key, value := range extra {
 		values[key] = value

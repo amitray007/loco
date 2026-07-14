@@ -21,6 +21,42 @@ import (
 
 const SchemaVersion = 1
 
+// maxJobLogBytes caps how much a single run may write to each of stdout/stderr, so a
+// chatty or runaway command cannot fill the disk. Output past the cap is dropped and
+// the run record is flagged truncated.
+const maxJobLogBytes = 8 << 20 // 8 MiB per stream
+
+// runHistoryLimit bounds how many run records (and their logs) are retained per job.
+const runHistoryLimit = 200
+
+// cappedWriter writes up to limit bytes to w, then discards the rest and remembers it
+// truncated.
+type cappedWriter struct {
+	w         *os.File
+	limit     int64
+	written   int64
+	truncated bool
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if c.written >= c.limit {
+		c.truncated = true
+		return len(p), nil // pretend success so the child isn't killed by EPIPE
+	}
+	remaining := c.limit - c.written
+	if int64(len(p)) > remaining {
+		c.truncated = true
+		if _, err := c.w.Write(p[:remaining]); err != nil {
+			return 0, err
+		}
+		c.written = c.limit
+		return len(p), nil
+	}
+	n, err := c.w.Write(p)
+	c.written += int64(n)
+	return n, err
+}
+
 type Spec struct {
 	Schedule   string            `json:"schedule"`
 	Command    []string          `json:"command"`
@@ -48,6 +84,7 @@ type RunRecord struct {
 	Error         string `json:"error,omitempty"`
 	StdoutPath    string `json:"stdout_path,omitempty"`
 	StderrPath    string `json:"stderr_path,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
 }
 
 type Manager struct {
@@ -183,13 +220,12 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 	defer stdout.Close()
 	defer stderr.Close()
 
+	outCap := &cappedWriter{w: stdout, limit: maxJobLogBytes}
+	errCap := &cappedWriter{w: stderr, limit: maxJobLogBytes}
 	cmd := exec.CommandContext(m.ctx, spec.Command[0], spec.Command[1:]...)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdout, cmd.Stderr = outCap, errCap
 	cmd.Dir = spec.WorkingDir
-	cmd.Env = os.Environ()
-	for key, value := range spec.Env {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = childEnv(spec.Env)
 	err := cmd.Run()
 	if err == nil {
 		record.Status = "success"
@@ -201,6 +237,7 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 			record.ExitCode = exitErr.ExitCode()
 		}
 	}
+	record.Truncated = outCap.truncated || errCap.truncated
 	m.finishRecord(&record, started)
 }
 
@@ -261,6 +298,71 @@ func (m *Manager) writeRecord(record RunRecord) {
 		return
 	}
 	_ = os.Rename(tmpName, filepath.Join(dir, record.ID+".json"))
+	m.pruneRuns(record.Job)
+}
+
+// childEnv builds the environment for a job command. It deliberately does NOT inherit
+// the daemon's full environment (which may hold operator secrets); it seeds a minimal,
+// predictable base and overlays the job's declared Env.
+func childEnv(extra map[string]string) []string {
+	base := map[string]string{}
+	for _, key := range []string{"PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "TZ"} {
+		if value, ok := os.LookupEnv(key); ok {
+			base[key] = value
+		}
+	}
+	if base["PATH"] == "" {
+		base["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+	}
+	for key, value := range extra {
+		base[key] = value
+	}
+	keys := make([]string, 0, len(base))
+	for key := range base {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+base[key])
+	}
+	return result
+}
+
+// pruneRuns keeps only the newest runHistoryLimit run records for a job and deletes the
+// older records together with their stdout/stderr logs, so history cannot grow without
+// bound. Best-effort: failures are ignored, the just-written record is never removed.
+func (m *Manager) pruneRuns(job string) {
+	dir := filepath.Join(m.paths.RunsDir, job)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	records := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			records = append(records, entry.Name())
+		}
+	}
+	if len(records) <= runHistoryLimit {
+		return
+	}
+	sort.Strings(records) // run ids are time-sortable
+	for _, name := range records[:len(records)-runHistoryLimit] {
+		path := filepath.Join(dir, name)
+		if data, err := os.ReadFile(path); err == nil {
+			var record RunRecord
+			if json.Unmarshal(data, &record) == nil {
+				if record.StdoutPath != "" {
+					_ = os.Remove(record.StdoutPath)
+				}
+				if record.StderrPath != "" {
+					_ = os.Remove(record.StderrPath)
+				}
+			}
+		}
+		_ = os.Remove(path)
+	}
 }
 
 func (m *Manager) jobLock(name string) *sync.Mutex {
