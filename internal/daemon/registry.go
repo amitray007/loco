@@ -70,6 +70,34 @@ func RegistryPut(ctx context.Context, socket string, timeout time.Duration, inpu
 	return result, nil
 }
 
+func RegistryDelete(ctx context.Context, socket string, timeout time.Duration, name string) (registry.DeleteResult, error) {
+	conn, err := dial(ctx, socket, timeout)
+	if err != nil {
+		return registry.DeleteResult{}, err
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("registry.delete\n")); err != nil {
+		return registry.DeleteResult{}, fmt.Errorf("request registry delete: %w", err)
+	}
+	if err := json.NewEncoder(conn).Encode(struct {
+		Name string `json:"name"`
+	}{Name: name}); err != nil {
+		return registry.DeleteResult{}, fmt.Errorf("encode delete request: %w", err)
+	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(conn).Decode(&raw); err != nil {
+		return registry.DeleteResult{}, fmt.Errorf("decode delete response: %w", err)
+	}
+	if err := responseError(raw); err != nil {
+		return registry.DeleteResult{}, err
+	}
+	var result registry.DeleteResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return registry.DeleteResult{}, fmt.Errorf("decode delete result: %w", err)
+	}
+	return result, nil
+}
+
 func RegistryList(ctx context.Context, socket string, timeout time.Duration) (registry.Document, error) {
 	conn, err := dial(ctx, socket, timeout)
 	if err != nil {

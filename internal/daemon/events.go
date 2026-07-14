@@ -24,6 +24,16 @@ func EventsRead(ctx context.Context, socket string, timeout time.Duration, topic
 	err := eventRequest(ctx, socket, timeout, "events.read", request, &result)
 	return result, err
 }
+func EventsPeek(ctx context.Context, socket string, timeout time.Duration, topic string, tail int, fromSeq uint64) (events.ReadResult, error) {
+	request := struct {
+		Topic   string `json:"topic"`
+		Tail    int    `json:"tail"`
+		FromSeq uint64 `json:"from_seq"`
+	}{topic, tail, fromSeq}
+	var result events.ReadResult
+	err := eventRequest(ctx, socket, timeout, "events.peek", request, &result)
+	return result, err
+}
 func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string) (events.AckResult, error) {
 	request := struct {
 		Topic   string `json:"topic"`

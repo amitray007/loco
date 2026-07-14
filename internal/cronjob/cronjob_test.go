@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestRunHistoryIsPruned(t *testing.T) {
 func TestChildEnvExcludesDaemonSecrets(t *testing.T) {
 	os.Setenv("LOCO_TEST_SECRET", "topsecret")
 	defer os.Unsetenv("LOCO_TEST_SECRET")
-	env := childEnv(map[string]string{"MY_VAR": "1"})
+	env := childEnv(map[string]string{"MY_VAR": "1"}, nil)
 	for _, kv := range env {
 		if len(kv) >= 17 && kv[:17] == "LOCO_TEST_SECRET=" {
 			t.Fatal("child env leaked the daemon secret")
@@ -215,5 +216,84 @@ func TestChildEnvExcludesDaemonSecrets(t *testing.T) {
 	}
 	if !sawMyVar || !sawPath {
 		t.Fatalf("child env missing declared var or PATH: %v", env)
+	}
+}
+
+// B1/F-18: declared --env reaches the child; --env-passthrough inherits a named daemon
+// var; unlisted daemon secrets are still excluded.
+func TestChildEnvDeclaredAndPassthrough(t *testing.T) {
+	os.Setenv("LOCO_TEST_PASS", "inherited")
+	os.Setenv("LOCO_TEST_SECRET", "should-not-leak")
+	defer os.Unsetenv("LOCO_TEST_PASS")
+	defer os.Unsetenv("LOCO_TEST_SECRET")
+
+	env := childEnv(map[string]string{"DECLARED": "yes"}, []string{"LOCO_TEST_PASS"})
+	has := func(kv string) bool {
+		for _, e := range env {
+			if e == kv {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("DECLARED=yes") {
+		t.Fatal("declared env var missing")
+	}
+	if !has("LOCO_TEST_PASS=inherited") {
+		t.Fatal("passthrough var not inherited")
+	}
+	for _, e := range env {
+		if strings.HasPrefix(e, "LOCO_TEST_SECRET=") {
+			t.Fatal("unlisted daemon secret leaked into child env")
+		}
+	}
+}
+
+// A hung job with a timeout is killed and recorded as "timeout" (fixes the lock-forever
+// bug where a wedged run silently skips all future firings).
+func TestRunTimeoutKillsHungJob(t *testing.T) {
+	p := cronTestPaths(t)
+	store, err := registry.Open(p.Registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, _ := json.Marshal(Spec{Schedule: "*/5 * * * *", Command: []string{"/bin/sh", "-c", "sleep 30"}, TimeoutMS: 500})
+	store.Put(registry.PutInput{Name: "hang", Kind: "cron", Spec: spec})
+	manager := New(store, p)
+	manager.Start()
+	result, _ := manager.RunNow("hang")
+	recordPath := filepath.Join(p.RunsDir, "hang", result.RunID+".json")
+	var data []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err = os.ReadFile(recordPath); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	manager.Stop()
+	var record RunRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "timeout" {
+		t.Fatalf("status = %q, want timeout", record.Status)
+	}
+	// Killed near the 500ms deadline, not after the full 30s sleep.
+	if record.DurationMS > 5000 {
+		t.Fatalf("timed-out run took %dms; expected ~500ms", record.DurationMS)
+	}
+}
+
+// A negative timeout disables the cap; runTimeout resolves the three cases.
+func TestRunTimeoutResolution(t *testing.T) {
+	if got := runTimeout(Spec{TimeoutMS: 0}); got != defaultRunTimeout {
+		t.Fatalf("default = %v, want %v", got, defaultRunTimeout)
+	}
+	if got := runTimeout(Spec{TimeoutMS: -1}); got != 0 {
+		t.Fatalf("disabled = %v, want 0", got)
+	}
+	if got := runTimeout(Spec{TimeoutMS: 2000}); got != 2*time.Second {
+		t.Fatalf("explicit = %v, want 2s", got)
 	}
 }

@@ -1,3 +1,5 @@
+//go:build darwin
+
 package launchd
 
 import (
@@ -86,10 +88,10 @@ func TestInstallBootstrapsAndIsIdempotent(t *testing.T) {
 
 func TestInstallReloadsChangedPlist(t *testing.T) {
 	p := launchdTestPaths(t)
-	if err := os.MkdirAll(filepath.Dir(p.Plist), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.Plist()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p.Plist, []byte("old"), 0o644); err != nil {
+	if err := os.WriteFile(p.Plist(), []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{loaded: true}
@@ -101,10 +103,10 @@ func TestInstallReloadsChangedPlist(t *testing.T) {
 
 func TestUninstallRemovesBothJobs(t *testing.T) {
 	p := launchdTestPaths(t)
-	if err := os.MkdirAll(filepath.Dir(p.Plist), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.Plist()), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{p.Plist, p.WatchdogPlist} {
+	for _, path := range []string{p.Plist(), p.WatchdogPlist()} {
 		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +120,7 @@ func TestUninstallRemovesBothJobs(t *testing.T) {
 		t.Fatal("removed=false")
 	}
 	assertCommands(t, runner.calls, "print", "bootout", "print", "bootout")
-	for _, path := range []string{p.Plist, p.WatchdogPlist} {
+	for _, path := range []string{p.Plist(), p.WatchdogPlist()} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s remains", path)
 		}
@@ -141,8 +143,8 @@ func launchdTestPaths(t *testing.T) paths.Paths {
 		Lock:          filepath.Join(root, "config", "run", "daemon.lock"),
 		State:         filepath.Join(root, "config", "run", "daemon.json"),
 		Registry:      filepath.Join(root, "config", "registry.json"),
-		Plist:         filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
-		WatchdogPlist: filepath.Join(root, "LaunchAgents", paths.WatchdogLaunchdLabel+".plist"),
+		ServiceUnit:   filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
+		WatchdogUnit:  filepath.Join(root, "LaunchAgents", paths.WatchdogLaunchdLabel+".plist"),
 	}
 }
 

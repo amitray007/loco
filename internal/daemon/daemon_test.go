@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,7 +129,7 @@ func testPaths(t *testing.T) paths.Paths {
 		Lock:        filepath.Join(root, "run", "daemon.lock"),
 		State:       filepath.Join(root, "run", "daemon.json"),
 		Registry:    filepath.Join(root, "registry.json"),
-		Plist:       filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
+		ServiceUnit: filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }
 
@@ -144,4 +145,25 @@ func waitForStatus(t *testing.T, socket string) Health {
 	}
 	t.Fatalf("daemon did not become healthy at %s", socket)
 	return Health{}
+}
+
+// B4: an over-long socket path fails preflight with an actionable message, not an opaque
+// "bind: invalid argument" deep in the net stack.
+func TestSocketPathTooLongIsPreflighted(t *testing.T) {
+	long := "/tmp/" + strings.Repeat("x", 120)
+	p := paths.Paths{
+		ConfigDir: "/tmp",
+		RunDir:    "/tmp",
+		LogDir:    "/tmp",
+		RunsDir:   "/tmp",
+		EventsDir: "/tmp",
+		Socket:    filepath.Join(long, "daemon.sock"),
+		Lock:      "/tmp/x.lock",
+		State:     "/tmp/x.json",
+		Registry:  "/tmp/x-registry.json",
+	}
+	err := Run(context.Background(), p, "test")
+	if err == nil || !strings.Contains(err.Error(), "socket path is too long") {
+		t.Fatalf("expected socket-too-long preflight error, got: %v", err)
+	}
 }

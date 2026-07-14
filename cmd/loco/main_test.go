@@ -122,12 +122,12 @@ func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
 	}
-	if !report.Healthy || len(report.Checks) != 6 {
+	if !report.Healthy || len(report.Checks) != 7 {
 		t.Fatalf("report = %+v", report)
 	}
 	want := map[string]string{
 		"runtime-paths": "pass", "daemon-rpc": "pass", "registry": "pass",
-		"durable-stores": "pass", "launchd-daemon": "warn", "launchd-watchdog": "warn",
+		"durable-stores": "pass", "disk-usage": "pass", "service-unit": "warn", "watchdog-unit": "warn",
 	}
 	for _, check := range report.Checks {
 		if check.Status != want[check.Name] {
@@ -711,5 +711,37 @@ func TestBadArgsPrintUsageNotSilence(t *testing.T) {
 		if strings.TrimSpace(stderr.String()) == "" {
 			t.Fatalf("%v: exited 1 with empty stderr (silent failure)", args)
 		}
+	}
+}
+
+// B2/A2: `loco version` prints the version and exits 0.
+func TestVersionCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("version exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.HasPrefix(stdout.String(), "loco ") {
+		t.Fatalf("version output = %q", stdout.String())
+	}
+}
+
+// B2: `loco cron remove` on a missing job reports not-found (exit 1), not silence.
+func TestCronRemoveMissingJob(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- daemon.Run(ctx, p, "remove-test") }()
+	waitForDaemon(t, p.Socket)
+	defer func() { cancel(); <-done }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "cron", "remove", "ghost"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("remove missing: code=%d stderr=%q", code, stderr.String())
 	}
 }

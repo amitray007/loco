@@ -7,7 +7,6 @@ import (
 )
 
 func TestResolveUsesExplicitConfigDirectory(t *testing.T) {
-	t.Setenv("LOCO_LAUNCH_AGENTS_DIR", filepath.Join(t.TempDir(), "agents"))
 	config := filepath.Join(t.TempDir(), "config")
 	p, err := Resolve(config)
 	if err != nil {
@@ -19,8 +18,22 @@ func TestResolveUsesExplicitConfigDirectory(t *testing.T) {
 	if p.Socket != filepath.Join(config, "run", "daemon.sock") {
 		t.Fatalf("Socket = %q", p.Socket)
 	}
-	if filepath.Base(p.Plist) != LaunchdLabel+".plist" {
-		t.Fatalf("Plist = %q", p.Plist)
+	// The service unit is the OS-appropriate file (.plist on darwin, .service on linux).
+	if filepath.Base(p.ServiceUnit) != serviceUnitName(Label) {
+		t.Fatalf("ServiceUnit = %q, want basename %q", p.ServiceUnit, serviceUnitName(Label))
+	}
+}
+
+// B3: LOCO_CONFIG_DIR selects the config dir when no --config-dir is given.
+func TestResolveHonorsLocoConfigDirEnv(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "envcfg")
+	t.Setenv("LOCO_CONFIG_DIR", dir)
+	p, err := Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ConfigDir != dir {
+		t.Fatalf("ConfigDir = %q, want %q from LOCO_CONFIG_DIR", p.ConfigDir, dir)
 	}
 }
 
@@ -45,5 +58,13 @@ func TestConfigDirTildeExpands(t *testing.T) {
 	}
 	if bare.ConfigDir != home {
 		t.Fatalf("bare ~ not expanded: got %s want %s", bare.ConfigDir, home)
+	}
+}
+
+// A control character in the config dir is rejected at resolution (consistent guard
+// across all commands, not just Install).
+func TestResolveRejectsControlCharConfigDir(t *testing.T) {
+	if _, err := Resolve("/tmp/x\ninjected"); err == nil {
+		t.Fatal("expected control-char config dir to be rejected")
 	}
 }

@@ -32,7 +32,18 @@ type runtimeState struct {
 	Version       string `json:"version"`
 }
 
+// maxUnixSocketPath is the portable ceiling for a unix socket path (sun_path is 104
+// bytes on macOS/BSD, 108 on Linux). We validate against the smaller bound so a config
+// dir that works on one OS works on both.
+const maxUnixSocketPath = 104
+
 func Run(ctx context.Context, p paths.Paths, version string) error {
+	// Preflight the socket path length: a too-long path fails deep in the net stack
+	// with an opaque "bind: invalid argument". Catch it here with an actionable message.
+	if len(p.Socket) >= maxUnixSocketPath {
+		return fmt.Errorf("socket path is too long (%d >= %d bytes): choose a shorter --config-dir\n  %s",
+			len(p.Socket), maxUnixSocketPath, p.Socket)
+	}
 	if err := p.EnsureRuntimeDirs(); err != nil {
 		return err
 	}
@@ -49,10 +60,10 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
-	notifier := notification.New(p.NotifyState, p.Alerts, notification.MacSender{})
+	notifier := notification.New(p.NotifyState, p.Alerts, notification.DesktopSender())
 	automaticChannel := os.Getenv("LOCO_NOTIFY_CHANNEL")
 	if automaticChannel == "" {
-		automaticChannel = "macos"
+		automaticChannel = "desktop"
 	}
 	failureHandler := func(name string, record cronjob.RunRecord) {
 		_, _ = notifier.Send(context.Background(), notification.Input{Title: "loco job failed", Body: fmt.Sprintf("%s exited with code %d", name, record.ExitCode), Channel: automaticChannel, Group: "job-failure:" + name})
@@ -252,6 +263,22 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			return
 		}
 		_ = encoder.Encode(result)
+	case "events.peek":
+		var request struct {
+			Topic   string `json:"topic"`
+			Tail    int    `json:"tail"`
+			FromSeq uint64 `json:"from_seq"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode peek request: " + err.Error()})
+			return
+		}
+		result, err := eventStore.Peek(request.Topic, request.Tail, request.FromSeq)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
 	case "events.ack":
 		var request struct {
 			Topic   string `json:"topic"`
@@ -281,6 +308,25 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 		if err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return
+		}
+		_ = encoder.Encode(result)
+	case "registry.delete":
+		var request struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode delete request: " + err.Error()})
+			return
+		}
+		result, err := registryStore.Delete(request.Name)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		if result.Removed {
+			// Drop the now-absent job from the running managers (stops a deleted service).
+			_ = cronManager.Reload()
+			_ = serviceManager.Reload()
 		}
 		_ = encoder.Encode(result)
 	case "registry.list":

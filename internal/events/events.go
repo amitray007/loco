@@ -256,6 +256,50 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 	return result, nil
 }
 
+// Peek returns the most recent events on a topic WITHOUT creating or touching any
+// cursor. Unlike Read, it has no side effects — so inspecting a topic can never mint a
+// cursor that silently pins retention for 30 days. tail<=0 defaults to 20; fromSeq>0
+// returns events with Seq>=fromSeq (oldest-first) instead of the tail.
+func (s *Store) Peek(topic string, tail int, fromSeq uint64) (ReadResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := validateComponent("topic", topic); err != nil {
+		return ReadResult{}, err
+	}
+	if tail < 0 {
+		return ReadResult{}, errors.New("tail cannot be negative")
+	}
+	if tail == 0 {
+		tail = 20
+	}
+	if tail > 1000 {
+		return ReadResult{}, errors.New("tail cannot exceed 1000")
+	}
+	_, all, err := s.loadTopic(topic)
+	if err != nil {
+		return ReadResult{}, err
+	}
+	result := ReadResult{SchemaVersion: SchemaVersion, Topic: topic, Cursor: "", Events: make([]Event, 0)}
+	if fromSeq > 0 {
+		for _, event := range all {
+			if event.Seq >= fromSeq {
+				result.Events = append(result.Events, event)
+				if len(result.Events) >= tail {
+					break
+				}
+			}
+		}
+		return result, nil
+	}
+	// Tail: the last `tail` events in order.
+	start := 0
+	if len(all) > tail {
+		start = len(all) - tail
+	}
+	result.Events = append(result.Events, all[start:]...)
+	return result, nil
+}
+
 func (s *Store) Ack(topic, cursorName, throughID string) (AckResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

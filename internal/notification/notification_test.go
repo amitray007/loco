@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,25 +82,9 @@ func TestFailedDeliveryDoesNotConsumeGroup(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
-func TestAppleScriptEscaping(t *testing.T) {
-	got := escapeAppleScript("a \\\"quoted\\\"\nline")
-	if strings.Contains(got, "\n") || !strings.Contains(got, `\\\"quoted\\\"`) {
-		t.Fatalf("escaped=%q", got)
-	}
-}
 
-func TestNotificationAppleScriptCompiles(t *testing.T) {
-	if _, err := exec.LookPath("osacompile"); err != nil {
-		t.Skip("osacompile unavailable")
-	}
-	output := filepath.Join(t.TempDir(), "notification.scpt")
-	if data, err := exec.Command("osacompile", "-o", output, "-e", appleScript(`Title "quoted"`, `Body \\ text`)).CombinedOutput(); err != nil {
-		t.Fatalf("compile: %v: %s", err, data)
-	}
-}
-
-// F-05: SenderForChannel("file") writes to the alerts log instead of shelling out to
-// osascript, so the watchdog can run headless without posting real banners.
+// F-05: SenderForChannel("file") writes to the alerts log instead of shelling out to a
+// desktop notifier, so the watchdog can run headless without posting real banners.
 func TestFileSenderWritesToAlertsNotDesktop(t *testing.T) {
 	alerts := filepath.Join(t.TempDir(), "alerts.jsonl")
 	sender := SenderForChannel("file", alerts)
@@ -118,8 +101,8 @@ func TestFileSenderWritesToAlertsNotDesktop(t *testing.T) {
 	if !strings.Contains(string(data), `"title":"title"`) || !strings.Contains(string(data), `"channel":"file"`) {
 		t.Fatalf("alert not written to file channel: %s", data)
 	}
-	// Default channel must be the desktop sender.
-	if _, ok := SenderForChannel("macos", alerts).(MacSender); !ok {
-		t.Fatal("default channel should be MacSender")
+	// The default channel must NOT be the file sender (it's the OS desktop sender).
+	if _, ok := SenderForChannel("desktop", alerts).(FileSender); ok {
+		t.Fatal("desktop channel should not be the file sender")
 	}
 }

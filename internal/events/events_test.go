@@ -512,3 +512,40 @@ func TestEmitStaysFlatWithTopicSize(t *testing.T) {
 		t.Fatalf("emit latency grew with topic size: early=%v late=%v (O(n) regression?)", early, late)
 	}
 }
+
+// Peek returns recent events without creating any cursor (closes the retention-pinning
+// footgun where inspecting a topic mints a 30-day compaction-blocking cursor).
+func TestPeekCreatesNoCursor(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"a", "b", "c"} {
+		store.Emit(EmitInput{Topic: "insp", ID: id, Payload: json.RawMessage(`{}`)})
+	}
+	res, err := store.Peek("insp", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Events) != 2 || res.Events[1].ID != "c" {
+		t.Fatalf("peek tail = %+v", res.Events)
+	}
+	// No cursor dir/files must have been created.
+	overview, _ := store.Overview()
+	for _, tp := range overview {
+		if tp.Name == "insp" && len(tp.Cursors) != 0 {
+			t.Fatalf("peek created %d cursors, want 0", len(tp.Cursors))
+		}
+	}
+	// from-seq mode returns oldest-first from the given seq.
+	fromRes, _ := store.Peek("insp", 10, 2)
+	if len(fromRes.Events) != 2 || fromRes.Events[0].Seq != 2 {
+		t.Fatalf("peek from-seq = %+v", fromRes.Events)
+	}
+}
+
+// Peek rejects a negative tail (consistent with Read's negative-limit guard).
+func TestPeekRejectsNegativeTail(t *testing.T) {
+	store := testStore(t)
+	store.Emit(EmitInput{Topic: "t", ID: "a", Payload: json.RawMessage(`{}`)})
+	if _, err := store.Peek("t", -5, 0); err == nil {
+		t.Fatal("expected negative tail to be rejected")
+	}
+}
