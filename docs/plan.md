@@ -211,26 +211,6 @@ for policy-gated agent runs (the primary human interaction surface — humans
 visit the dashboard; only notify interrupts them) + Stop-hook drain +
 pm jobs pane (slim embed) + Slack notify.
 
-### Scope decision — v1 (2026-07-14, after docs/scope-cut-proposal.md review)
-The scope-cut proposal is ACCEPTED with four amendments. v1 = foundation
-(daemon/apply/svc/cron/dynamic-add/promote/notify/doctor) + legibility
-(status/recap/runs/logs) + broadcast events (emit/read/ack/topics) + hello
-succession + loco-plugin (SessionStart hook + CHANNEL flagship) + slim
-`loco ui` (Jobs + Recap panes — kept as an explicit user requirement) +
-pr-watch conversion. DEFERRED: broker tier (run/watch/timer→cron --once/
-cache/lock/state), queue topic mode, tenancy quotas, mcp serve, onboard
---install, artifacts, full dashboard panes.
-Amendments: (1) `lock`'s cut rationale corrected — a second concurrent
-writer WAS demonstrated (wok state clobber); v1 answer is split file
-ownership, enforced in the pr-watch conversion. (2) `cron add --once --at`
-absorbs `timer`. (3) onboarding ships as a static prompt block in docs.
-(4) `hello` briefing drops the run-results field (referenced cut `run`).
-Hardened event semantics: ONLY the daemon writes event files (emit via unix
-socket; fails loudly when daemon down; reads stay file-based) and cursors
-reference event ids, never byte offsets (compaction-safe).
-pr-watch conversion requirement: script-owned and session-owned state live
-in SEPARATE single-writer files; shared coordination goes through events.
-
 ### Kill criteria (re-check at end of Phase 2)
 (a) Anthropic ships durable LOCAL background execution with records, or a
 cross-session event bus → loco's core shrinks to manifests+records+adapters.
