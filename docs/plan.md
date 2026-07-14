@@ -205,7 +205,11 @@ hello/onboard, dynamic svc/cron add + promote) as tier 0/1 (CLI + MCP serve)
 proactively telling live sessions what loco found is the point of the
 product; hooks/CLI remain the lossless floor beneath it — + pr-watch
 conversion. Phase 3 = the broker tier (run/watch/timer/cache/lock/state) +
-Stop-hook drain + TUI/pm jobs pane + Slack notify.
+`loco ui` — an **OpenTUI dashboard** (TypeScript, beside the plugin, same
+JSON contract): jobs / events / runs / recap panes plus the APPROVALS queue
+for policy-gated agent runs (the primary human interaction surface — humans
+visit the dashboard; only notify interrupts them) + Stop-hook drain +
+pm jobs pane (slim embed) + Slack notify.
 
 ### Kill criteria (re-check at end of Phase 2)
 (a) Anthropic ships durable LOCAL background execution with records, or a

@@ -236,6 +236,31 @@ topic="…">` tags within seconds, filtered per session (your reply topic +
 subscribed shared topics), with `ack`/`claim` exposed as reply tools. Hooks
 and CLI remain the lossless floor beneath it.
 
+## Human surface — `loco ui` (OpenTUI dashboard)
+
+Humans shouldn't have to speak the CLI. `loco ui` launches a full-screen
+terminal dashboard built with **OpenTUI** (TypeScript — it lives in the same
+TS layer as the loco-plugin, and consumes the exact same JSON contract as
+every other consumer; the dashboard has zero private APIs).
+
+Panes:
+- **Jobs** — services/crons across projects: state, last run, restarts;
+  start/stop/restart/run-now with a keypress; dynamic jobs show owner + TTL,
+  with one-key promote/renew/kill.
+- **Events** — live topic feed with per-cursor unread badges; inspect any
+  event's payload; see which agent claimed what.
+- **Runs & logs** — drill from a job to its run records to captured output.
+- **Approvals** — the pending-approval queue for policy-gated agent `run`
+  requests: what the agent wants to execute, why, one-key allow/deny.
+  (This is the human's most important interactive surface — it is how
+  delegation stays governed without breaking agent flow.)
+- **Recap** — the prose digest, live.
+
+**Use when:** you want eyes on the system or a decision surfaced — everything
+else should reach you via `notify` so the dashboard is a place you *visit*,
+not one you must watch. (pm's future jobs pane embeds a slim read-only
+version of the same panes.)
+
 ## Agent-ergonomics guarantees (the contract behind the contract)
 
 1. **Mortality-safe**: every operation assumes the caller may die mid-flight —
