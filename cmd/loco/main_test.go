@@ -666,3 +666,50 @@ func TestWatchdogCLITracksFailuresAndResetsWhenDaemonRecovers(t *testing.T) {
 		t.Fatalf("recovered state=%+v", state)
 	}
 }
+
+// F-15: `notify --channel file TITLE BODY` (flag before positionals) must parse, not
+// silently fail. Verified through the parser without a daemon by checking it reaches the
+// dial stage (exit 2, connection error) rather than the arg-usage stage (exit 1).
+func TestNotifyAcceptsFlagBeforePositionals(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "notify", "--channel", "file", "Title", "Body"}, &stdout, &stderr)
+	// No daemon is running, so this must fail at the RPC dial (exit 2) — proving the
+	// args parsed. The old behavior exited 1 with an empty message.
+	if code != 2 {
+		t.Fatalf("flag-first notify did not parse: code=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "send notification") {
+		t.Fatalf("expected a dial error, got: %q", stderr.String())
+	}
+}
+
+// F-19: the reserved job-failure: group prefix is rejected from user notify.
+func TestNotifyRejectsReservedGroup(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "notify", "T", "B", "--group", "job-failure:worker"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "reserved") {
+		t.Fatalf("reserved group not rejected: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+// F-14: commands that reject bad args must print usage, not exit silently.
+func TestBadArgsPrintUsageNotSilence(t *testing.T) {
+	root := t.TempDir()
+	cases := [][]string{
+		{"--config-dir", root, "cron", "run-now", "job", "extra"},
+		{"--config-dir", root, "svc", "start", "svc1", "extra"},
+		{"--config-dir", root, "notify", "T", "B", "extra"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		code := run(args, &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("%v: expected exit 1, got %d", args, code)
+		}
+		if strings.TrimSpace(stderr.String()) == "" {
+			t.Fatalf("%v: exited 1 with empty stderr (silent failure)", args)
+		}
+	}
+}
