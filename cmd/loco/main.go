@@ -48,6 +48,7 @@ Usage:
   loco [--config-dir DIR] events read TOPIC --cursor NAME [--limit N]
   loco [--config-dir DIR] events ack TOPIC --cursor NAME --through ID
   loco [--config-dir DIR] status [--json]
+  loco [--config-dir DIR] doctor [--json]
   loco [--config-dir DIR] notify TITLE BODY [--channel macos|file] [--group KEY]
 
 Commands:
@@ -68,6 +69,7 @@ Commands:
   events read        Read without advancing a named cursor
   events ack         Advance a cursor through an event ID
   status             Show daemon, jobs, unread cursors, and recent alerts
+  doctor             Check the local daemon and durable spine without mutations
   notify             Send a grouped human notification
 
 Exit codes:
@@ -95,7 +97,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "notify" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" && args[0] != "svc" && args[0] != "events" && args[0] != "status" && args[0] != "doctor" && args[0] != "notify" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -110,6 +112,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if args[0] == "status" {
 		return runStatus(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	if args[0] == "doctor" {
+		return runDoctor(args[1:], p, *jsonOutput, stdout, stderr)
 	}
 	if args[0] == "notify" {
 		return runNotify(args[1:], p, *jsonOutput, stdout, stderr)
@@ -691,6 +696,123 @@ func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			}
 			fmt.Fprintln(stdout)
 		}
+	}
+	return 0
+}
+
+type doctorCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+type doctorReport struct {
+	SchemaVersion int           `json:"schema_version"`
+	Healthy       bool          `json:"healthy"`
+	Checks        []doctorCheck `json:"checks"`
+}
+
+func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	jsonFlag := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: loco doctor [--json]")
+		return 1
+	}
+
+	checks := make([]doctorCheck, 0, 6)
+	add := func(name, status, detail string) {
+		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail})
+	}
+
+	dirs := []string{p.ConfigDir, p.RunDir, p.LogDir, p.RunsDir, p.EventsDir}
+	missing := make([]string, 0)
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if err != nil {
+			missing = append(missing, fmt.Sprintf("%s: %v", dir, err))
+			continue
+		}
+		if !info.IsDir() {
+			missing = append(missing, dir+": not a directory")
+		}
+	}
+	if len(missing) == 0 {
+		add("runtime-paths", "pass", fmt.Sprintf("%d runtime directories are present", len(dirs)))
+	} else {
+		add("runtime-paths", "fail", strings.Join(missing, "; "))
+	}
+
+	health, healthErr := daemon.Status(context.Background(), p.Socket, 750*time.Millisecond)
+	if healthErr != nil {
+		add("daemon-rpc", "fail", healthErr.Error())
+	} else {
+		add("daemon-rpc", "pass", fmt.Sprintf("pid %d, uptime %s, version %s", health.PID, formatUptime(health.UptimeSeconds), health.Version))
+	}
+
+	document, registryErr := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
+	if registryErr != nil {
+		add("registry", "fail", registryErr.Error())
+	} else {
+		add("registry", "pass", fmt.Sprintf("revision %d, %d jobs", document.Revision, len(document.Jobs)))
+	}
+
+	overview, overviewErr := daemon.StatusOverview(context.Background(), p.Socket, 2*time.Second)
+	if overviewErr != nil {
+		add("durable-stores", "fail", overviewErr.Error())
+	} else {
+		add("durable-stores", "pass", fmt.Sprintf("%d jobs, %d topics, %d recent alerts", len(overview.Jobs), len(overview.Topics), len(overview.Alerts)))
+	}
+
+	for _, item := range []struct {
+		name string
+		path string
+	}{
+		{name: "launchd-daemon", path: p.Plist},
+		{name: "launchd-watchdog", path: p.WatchdogPlist},
+	} {
+		info, err := os.Stat(item.path)
+		if errors.Is(err, os.ErrNotExist) {
+			add(item.name, "warn", "plist not installed: "+item.path)
+		} else if err != nil {
+			add(item.name, "fail", err.Error())
+		} else if !info.Mode().IsRegular() {
+			add(item.name, "fail", "plist path is not a regular file: "+item.path)
+		} else {
+			add(item.name, "pass", item.path)
+		}
+	}
+
+	report := doctorReport{SchemaVersion: 1, Healthy: true, Checks: checks}
+	passed, warnings := 0, 0
+	for _, check := range checks {
+		switch check.Status {
+		case "pass":
+			passed++
+		case "warn":
+			warnings++
+		case "fail":
+			report.Healthy = false
+		}
+	}
+	if globalJSON || *jsonFlag {
+		_ = json.NewEncoder(stdout).Encode(report)
+	} else {
+		for _, check := range checks {
+			fmt.Fprintf(stdout, "%s  %s  %s\n", strings.ToUpper(check.Status), check.Name, check.Detail)
+		}
+		state := "healthy"
+		if !report.Healthy {
+			state = "unhealthy"
+		}
+		fmt.Fprintf(stdout, "loco doctor: %s (%d passed, %d warnings)\n", state, passed, warnings)
+	}
+	if !report.Healthy {
+		return 2
 	}
 	return 0
 }

@@ -94,6 +94,73 @@ func TestUnavailableStatusIsStructuredSystemError(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-doctor-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "doctor-test") }()
+	waitForDaemon(t, p.Socket)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "doctor", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
+	}
+	if !report.Healthy || len(report.Checks) != 6 {
+		t.Fatalf("report = %+v", report)
+	}
+	want := map[string]string{
+		"runtime-paths": "pass", "daemon-rpc": "pass", "registry": "pass",
+		"durable-stores": "pass", "launchd-daemon": "warn", "launchd-watchdog": "warn",
+	}
+	for _, check := range report.Checks {
+		if check.Status != want[check.Name] {
+			t.Errorf("check %s status = %q, want %q", check.Name, check.Status, want[check.Name])
+		}
+	}
+}
+
+func TestDoctorReportsUnavailableDaemonAsFailure(t *testing.T) {
+	root := t.TempDir()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "doctor", "--json"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code = %d, want 2; stderr = %s", code, stderr.String())
+	}
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
+	}
+	if report.Healthy {
+		t.Fatalf("report = %+v", report)
+	}
+	statuses := make(map[string]string)
+	for _, check := range report.Checks {
+		statuses[check.Name] = check.Status
+	}
+	if statuses["runtime-paths"] != "fail" || statuses["daemon-rpc"] != "fail" ||
+		statuses["registry"] != "fail" || statuses["durable-stores"] != "fail" {
+		t.Fatalf("statuses = %+v", statuses)
+	}
+}
+
 func TestRegistryPutAndListJSON(t *testing.T) {
 	root, err := os.MkdirTemp("/tmp", "loco-cli-registry-")
 	if err != nil {
