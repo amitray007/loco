@@ -201,3 +201,32 @@ Per final-plan §9 / §10, driven only when a *second* consumer actually needs t
 6. **Observability for soak** (§2.3) — so a real week of use is judgeable.
 7. **Then**, and only then, the post-spine flagship: `loco-channel` (§4) and real
    integration/rollout.
+
+---
+
+## Completion status (autonomous session, 2026-07-15)
+
+Everything below the v1 spine has now been built on branch `feat/oss-and-cross-platform`:
+
+- **Cross-platform** — macOS launchd + Linux systemd user units via `internal/platform`
+  build-tag abstraction; both GOOS build+test green.
+- **All functional gaps closed** — `--env`/`--env-passthrough` (F-18 escape hatch),
+  `cron remove` + registry `Delete`, `events list`, `loco version`, `LOCO_CONFIG_DIR`,
+  socket-path preflight, disk-usage doctor check.
+- **`loco mcp serve`** — dependency-free stdio MCP server exposing 6 tools to agents.
+- **Five PM-prioritized features** — `cron --timeout` (fixes hung-lock bug),
+  `cron pause|resume`, `events peek` (cursor-free), `events read --wait` (agent await),
+  `loco runs` / `loco logs`.
+- **OSS infrastructure** — MIT LICENSE, public README, CONTRIBUTING/SECURITY/COC/CHANGELOG,
+  issue+PR templates, Makefile, CI (macos+linux matrix, lint, govulncheck), goreleaser +
+  Homebrew cask (→ amitray007/homebrew-tap).
+- **Privacy scrub** — personal labels → `dev.loco.*`, private email removed, copyright →
+  "The loco authors"; only the module/import path retains the owner name (public repo URL).
+
+### Deferred (documented, not built — awaiting a real second consumer or your call)
+- The `loco-channel` Claude Code push adapter (final-plan §11) — the flagship; gated on soak.
+- Fable PM P1/P2 backlog: structured leveled logging + counters, shell completions + man
+  page + per-subcommand help, `cron import-crontab`, `notify --channel webhook`, schema
+  compatibility doc, `doctor --fix`.
+- §9 platform tier: `.loco/jobs.yaml` + apply, broker primitives, queue/claim, TUI,
+  succession, Slack notify.
