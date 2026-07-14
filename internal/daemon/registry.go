@@ -7,12 +7,41 @@ import (
 	"net"
 	"time"
 
+	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/registry"
 )
 
 type wireError struct {
 	SchemaVersion int    `json:"schema_version"`
 	Error         string `json:"error"`
+}
+
+func CronRunNow(ctx context.Context, socket string, timeout time.Duration, name string) (cronjob.TriggerResult, error) {
+	conn, err := dial(ctx, socket, timeout)
+	if err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("cron.run-now\n")); err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	if err := json.NewEncoder(conn).Encode(struct {
+		Name string `json:"name"`
+	}{Name: name}); err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	var raw json.RawMessage
+	if err := json.NewDecoder(conn).Decode(&raw); err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	if err := responseError(raw); err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	var result cronjob.TriggerResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return cronjob.TriggerResult{}, err
+	}
+	return result, nil
 }
 
 func RegistryPut(ctx context.Context, socket string, timeout time.Duration, input registry.PutInput) (registry.PutResult, error) {

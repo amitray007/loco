@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/launchd"
 	"github.com/amitray007/loco/internal/paths"
@@ -33,6 +34,9 @@ Usage:
   loco [--config-dir DIR] daemon run
   loco [--config-dir DIR] registry put NAME --kind cron|svc --data JSON
   loco [--config-dir DIR] registry list [--json]
+  loco [--config-dir DIR] cron add NAME --schedule CRON --cmd COMMAND
+  loco [--config-dir DIR] cron list [--json]
+  loco [--config-dir DIR] cron run-now NAME [--json]
 
 Commands:
   daemon install     Install and start the launchd service
@@ -41,6 +45,9 @@ Commands:
   daemon run         Run the daemon in the foreground (used by launchd)
   registry put       Store a low-level job definition through the daemon
   registry list      List the daemon's loaded registry entries
+  cron add           Add or update a durable 5-field schedule
+  cron list          List scheduled jobs
+  cron run-now       Trigger a recorded run immediately
 
 Exit codes:
   0  success
@@ -67,7 +74,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" && args[0] != "registry" {
+	if args[0] != "daemon" && args[0] != "registry" && args[0] != "cron" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -80,7 +87,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if args[0] == "daemon" {
 		return runDaemon(args[1:], p, *jsonOutput, stdout, stderr)
 	}
-	return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
+	if args[0] == "registry" {
+		return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	return runCron(args[1:], p, *jsonOutput, stdout, stderr)
 }
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
@@ -256,6 +266,118 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 
 	default:
 		fmt.Fprintf(stderr, "unknown registry command %q\n", args[0])
+		return 1
+	}
+}
+
+func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: loco cron add|list|run-now")
+		return 1
+	}
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			return 1
+		}
+		name := args[1]
+		flags := flag.NewFlagSet("cron add", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		schedule := flags.String("schedule", "", "5-field cron schedule")
+		command := flags.String("cmd", "", "shell command")
+		workingDir := flags.String("working-dir", "", "working directory")
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if flags.NArg() != 0 || *schedule == "" || *command == "" {
+			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			return 1
+		}
+		spec := cronjob.Spec{Schedule: *schedule, Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir}
+		data, _ := json.Marshal(spec)
+		if _, err := cronjob.DecodeSpec(data); err != nil {
+			fmt.Fprintf(stderr, "invalid cron job: %v\n", err)
+			return 1
+		}
+		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, registry.PutInput{Name: name, Kind: "cron", Spec: data})
+		if err != nil {
+			fmt.Fprintf(stderr, "add cron job: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else if result.Changed {
+			fmt.Fprintf(stdout, "cron job %s stored (revision %d)\n", name, result.Revision)
+		} else {
+			fmt.Fprintf(stdout, "cron job %s unchanged (revision %d)\n", name, result.Revision)
+		}
+		return 0
+	case "list":
+		flags := flag.NewFlagSet("cron list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return 1
+		}
+		doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
+		if err != nil {
+			fmt.Fprintf(stderr, "list cron jobs: %v\n", err)
+			return 2
+		}
+		jobs := make(map[string]registry.Job)
+		for name, job := range doc.Jobs {
+			if job.Kind == "cron" {
+				jobs[name] = job
+			}
+		}
+		if globalJSON || *jsonFlag {
+			doc.Jobs = jobs
+			_ = json.NewEncoder(stdout).Encode(doc)
+			return 0
+		}
+		if len(jobs) == 0 {
+			fmt.Fprintln(stdout, "No cron jobs.")
+			return 0
+		}
+		names := make([]string, 0, len(jobs))
+		for name := range jobs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
+		for _, name := range names {
+			spec, _ := cronjob.DecodeSpec(jobs[name].Spec)
+			fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
+		}
+		_ = table.Flush()
+		return 0
+	case "run-now":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
+			return 1
+		}
+		flags := flag.NewFlagSet("cron run-now", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jsonFlag := flags.Bool("json", false, "emit JSON")
+		if err := flags.Parse(args[2:]); err != nil || flags.NArg() != 0 {
+			return 1
+		}
+		result, err := daemon.CronRunNow(context.Background(), p.Socket, 2*time.Second, args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "run cron job: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else {
+			fmt.Fprintf(stdout, "cron job %s accepted (run %s)\n", result.Job, result.RunID)
+		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown cron command %q\n", args[0])
 		return 1
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/amitray007/loco/internal/cronjob"
 	"github.com/amitray007/loco/internal/paths"
 	"github.com/amitray007/loco/internal/registry"
 )
@@ -44,6 +45,11 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
+	cronManager := cronjob.New(registryStore, p)
+	if err := cronManager.Start(); err != nil {
+		return fmt.Errorf("start cron manager: %w", err)
+	}
+	defer cronManager.Stop()
 
 	// Only the process holding daemon.lock may remove a stale socket.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -96,12 +102,12 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started, registryStore)
+			serveConnection(conn, state, started, registryStore, cronManager)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store, cronManager *cronjob.Manager) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	reader := bufio.NewReader(conn)
@@ -131,9 +137,26 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, regis
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return
 		}
+		if result.Changed {
+			_ = cronManager.Reload()
+		}
 		_ = encoder.Encode(result)
 	case "registry.list":
 		_ = encoder.Encode(registryStore.Snapshot())
+	case "cron.run-now":
+		var request struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(reader).Decode(&request); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode cron request: " + err.Error()})
+			return
+		}
+		result, err := cronManager.RunNow(request.Name)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
 	default:
 		_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "unknown daemon operation"})
 	}

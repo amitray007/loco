@@ -15,6 +15,7 @@ type Paths struct {
 	ConfigDir string
 	RunDir    string
 	LogDir    string
+	RunsDir   string
 	Socket    string
 	Lock      string
 	State     string
@@ -50,6 +51,7 @@ func Resolve(configOverride string) (Paths, error) {
 		ConfigDir: configDir,
 		RunDir:    runDir,
 		LogDir:    filepath.Join(configDir, "logs"),
+		RunsDir:   filepath.Join(configDir, "runs"),
 		Socket:    filepath.Join(runDir, "daemon.sock"),
 		Lock:      filepath.Join(runDir, "daemon.lock"),
 		State:     filepath.Join(runDir, "daemon.json"),
@@ -59,7 +61,7 @@ func Resolve(configOverride string) (Paths, error) {
 }
 
 func (p Paths) EnsureRuntimeDirs() error {
-	for _, dir := range []string{p.ConfigDir, p.RunDir, p.LogDir} {
+	for _, dir := range []string{p.ConfigDir, p.RunDir, p.LogDir, p.RunsDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
