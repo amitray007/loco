@@ -97,6 +97,7 @@ func launchdTestPaths(t *testing.T) paths.Paths {
 		Socket:    filepath.Join(root, "config", "run", "daemon.sock"),
 		Lock:      filepath.Join(root, "config", "run", "daemon.lock"),
 		State:     filepath.Join(root, "config", "run", "daemon.json"),
+		Registry:  filepath.Join(root, "config", "registry.json"),
 		Plist:     filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }

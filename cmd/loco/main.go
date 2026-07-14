@@ -10,13 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/amitray007/loco/internal/daemon"
 	"github.com/amitray007/loco/internal/launchd"
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/registry"
 )
 
 var version = "devel"
@@ -28,12 +31,16 @@ Usage:
   loco [--config-dir DIR] daemon uninstall
   loco [--config-dir DIR] daemon status [--json]
   loco [--config-dir DIR] daemon run
+  loco [--config-dir DIR] registry put NAME --kind cron|svc --data JSON
+  loco [--config-dir DIR] registry list [--json]
 
 Commands:
   daemon install     Install and start the launchd service
   daemon uninstall   Unload and remove the launchd service
   daemon status      Report daemon health, PID, and uptime
   daemon run         Run the daemon in the foreground (used by launchd)
+  registry put       Store a low-level job definition through the daemon
+  registry list      List the daemon's loaded registry entries
 
 Exit codes:
   0  success
@@ -60,7 +67,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if args[0] != "daemon" {
+	if args[0] != "daemon" && args[0] != "registry" {
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
@@ -70,7 +77,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "resolve paths: %v\n", err)
 		return 2
 	}
-	return runDaemon(args[1:], p, *jsonOutput, stdout, stderr)
+	if args[0] == "daemon" {
+		return runDaemon(args[1:], p, *jsonOutput, stdout, stderr)
+	}
+	return runRegistry(args[1:], p, *jsonOutput, stdout, stderr)
 }
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
@@ -158,6 +168,94 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 
 	default:
 		fmt.Fprintf(stderr, "unknown daemon command %q\n", args[0])
+		return 1
+	}
+}
+
+func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: loco registry put|list")
+		return 1
+	}
+
+	switch args[0] {
+	case "put":
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
+			return 1
+		}
+		name := args[1]
+		putFlags := flag.NewFlagSet("registry put", flag.ContinueOnError)
+		putFlags.SetOutput(stderr)
+		kind := putFlags.String("kind", "", "job kind: cron or svc")
+		data := putFlags.String("data", "{}", "opaque job definition as a JSON object")
+		jsonFlag := putFlags.Bool("json", false, "emit JSON")
+		if err := putFlags.Parse(args[2:]); err != nil {
+			return 1
+		}
+		if putFlags.NArg() != 0 || *kind == "" {
+			fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
+			return 1
+		}
+		input := registry.PutInput{Name: name, Kind: *kind, Spec: json.RawMessage(*data)}
+		if err := registry.Validate(input); err != nil {
+			fmt.Fprintf(stderr, "invalid registry entry: %v\n", err)
+			return 1
+		}
+		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, input)
+		if err != nil {
+			fmt.Fprintf(stderr, "put registry entry: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(result)
+		} else if result.Changed {
+			fmt.Fprintf(stdout, "registry entry %s stored (revision %d)\n", result.Job.Name, result.Revision)
+		} else {
+			fmt.Fprintf(stdout, "registry entry %s unchanged (revision %d)\n", result.Job.Name, result.Revision)
+		}
+		return 0
+
+	case "list":
+		listFlags := flag.NewFlagSet("registry list", flag.ContinueOnError)
+		listFlags.SetOutput(stderr)
+		jsonFlag := listFlags.Bool("json", false, "emit JSON")
+		if err := listFlags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		if listFlags.NArg() != 0 {
+			fmt.Fprintln(stderr, "usage: loco registry list [--json]")
+			return 1
+		}
+		document, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
+		if err != nil {
+			fmt.Fprintf(stderr, "list registry entries: %v\n", err)
+			return 2
+		}
+		if globalJSON || *jsonFlag {
+			_ = json.NewEncoder(stdout).Encode(document)
+			return 0
+		}
+		if len(document.Jobs) == 0 {
+			fmt.Fprintln(stdout, "No registry entries.")
+			return 0
+		}
+		names := make([]string, 0, len(document.Jobs))
+		for name := range document.Jobs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(table, "NAME\tKIND\tUPDATED")
+		for _, name := range names {
+			job := document.Jobs[name]
+			fmt.Fprintf(table, "%s\t%s\t%s\n", job.Name, job.Kind, job.UpdatedAt)
+		}
+		_ = table.Flush()
+		return 0
+
+	default:
+		fmt.Fprintf(stderr, "unknown registry command %q\n", args[0])
 		return 1
 	}
 }

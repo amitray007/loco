@@ -26,6 +26,7 @@ func TestStatusJSON(t *testing.T) {
 		Socket:    filepath.Join(root, "run", "daemon.sock"),
 		Lock:      filepath.Join(root, "run", "daemon.lock"),
 		State:     filepath.Join(root, "run", "daemon.json"),
+		Registry:  filepath.Join(root, "registry.json"),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -80,4 +81,51 @@ func TestUnavailableStatusIsStructuredSystemError(t *testing.T) {
 	if status.Healthy || status.SchemaVersion != daemon.SchemaVersion || status.Error == "" {
 		t.Fatalf("status = %+v", status)
 	}
+}
+
+func TestRegistryPutAndListJSON(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-registry-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "registry-test") }()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := daemon.Status(context.Background(), p.Socket, 50*time.Millisecond); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "registry", "put", "demo", "--kind", "svc", "--data", `{"command":["sleep","1"]}`, "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("put code = %d, stderr = %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"--config-dir", root, "registry", "list", "--json"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("list code = %d, stderr = %s", code, stderr.String())
+	}
+	var document struct {
+		SchemaVersion int                    `json:"schema_version"`
+		Revision      uint64                 `json:"revision"`
+		Jobs          map[string]interface{} `json:"jobs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.SchemaVersion != 1 || document.Revision != 1 || document.Jobs["demo"] == nil {
+		t.Fatalf("document = %+v", document)
+	}
+	cancel()
+	<-done
 }

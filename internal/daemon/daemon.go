@@ -9,11 +9,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/registry"
 )
 
 var ErrAlreadyRunning = errors.New("daemon is already running")
@@ -38,6 +40,10 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		_ = lock.Close()
 	}()
+	registryStore, err := registry.Open(p.Registry)
+	if err != nil {
+		return fmt.Errorf("open registry: %w", err)
+	}
 
 	// Only the process holding daemon.lock may remove a stale socket.
 	if err := os.Remove(p.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -90,27 +96,47 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		connections.Add(1)
 		go func() {
 			defer connections.Done()
-			serveConnection(conn, state, started)
+			serveConnection(conn, state, started, registryStore)
 		}()
 	}
 }
 
-func serveConnection(conn net.Conn, state runtimeState, started time.Time) {
+func serveConnection(conn net.Conn, state runtimeState, started time.Time, registryStore *registry.Store) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	scanner := bufio.NewScanner(conn)
-	if !scanner.Scan() || scanner.Text() != "status" {
+	reader := bufio.NewReader(conn)
+	command, err := reader.ReadString('\n')
+	if err != nil {
 		return
 	}
-	status := Health{
-		SchemaVersion: SchemaVersion,
-		Healthy:       true,
-		PID:           state.PID,
-		StartedAt:     state.StartedAt,
-		UptimeSeconds: int64(time.Since(started).Seconds()),
-		Version:       state.Version,
+	encoder := json.NewEncoder(conn)
+	switch strings.TrimSpace(command) {
+	case "status":
+		_ = encoder.Encode(Health{
+			SchemaVersion: SchemaVersion,
+			Healthy:       true,
+			PID:           state.PID,
+			StartedAt:     state.StartedAt,
+			UptimeSeconds: int64(time.Since(started).Seconds()),
+			Version:       state.Version,
+		})
+	case "registry.put":
+		var input registry.PutInput
+		if err := json.NewDecoder(reader).Decode(&input); err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode registry entry: " + err.Error()})
+			return
+		}
+		result, err := registryStore.Put(input)
+		if err != nil {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
+			return
+		}
+		_ = encoder.Encode(result)
+	case "registry.list":
+		_ = encoder.Encode(registryStore.Snapshot())
+	default:
+		_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "unknown daemon operation"})
 	}
-	_ = json.NewEncoder(conn).Encode(status)
 }
 
 func acquireLock(path string) (*os.File, error) {

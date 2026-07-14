@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/registry"
 )
 
 func TestRunServesHealthAndCleansUp(t *testing.T) {
@@ -66,6 +68,47 @@ func TestRunRejectsSecondDaemon(t *testing.T) {
 	<-done
 }
 
+func TestRegistrySurvivesDaemonRestart(t *testing.T) {
+	p := testPaths(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, p, "first") }()
+	waitForStatus(t, p.Socket)
+
+	put, err := RegistryPut(context.Background(), p.Socket, time.Second, registry.PutInput{
+		Name: "restart.demo",
+		Kind: "cron",
+		Spec: json.RawMessage(`{"schedule":"*/5 * * * *"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !put.Changed || put.Revision != 1 {
+		t.Fatalf("put = %+v", put)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first daemon returned %v", err)
+	}
+
+	secondCtx, secondCancel := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- Run(secondCtx, p, "second") }()
+	waitForStatus(t, p.Socket)
+	document, err := RegistryList(context.Background(), p.Socket, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, ok := document.Jobs["restart.demo"]
+	if !ok || job.Kind != "cron" || document.Revision != 1 {
+		t.Fatalf("reloaded registry = %+v", document)
+	}
+	secondCancel()
+	if err := <-secondDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("second daemon returned %v", err)
+	}
+}
+
 func testPaths(t *testing.T) paths.Paths {
 	t.Helper()
 	root, err := os.MkdirTemp("/tmp", "loco-daemon-test-")
@@ -80,6 +123,7 @@ func testPaths(t *testing.T) paths.Paths {
 		Socket:    filepath.Join(root, "run", "daemon.sock"),
 		Lock:      filepath.Join(root, "run", "daemon.lock"),
 		State:     filepath.Join(root, "run", "daemon.json"),
+		Registry:  filepath.Join(root, "registry.json"),
 		Plist:     filepath.Join(root, "LaunchAgents", paths.LaunchdLabel+".plist"),
 	}
 }

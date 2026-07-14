@@ -18,6 +18,7 @@ type Paths struct {
 	Socket    string
 	Lock      string
 	State     string
+	Registry  string
 	Plist     string
 }
 
@@ -52,6 +53,7 @@ func Resolve(configOverride string) (Paths, error) {
 		Socket:    filepath.Join(runDir, "daemon.sock"),
 		Lock:      filepath.Join(runDir, "daemon.lock"),
 		State:     filepath.Join(runDir, "daemon.json"),
+		Registry:  filepath.Join(configDir, "registry.json"),
 		Plist:     filepath.Join(launchAgentsDir, LaunchdLabel+".plist"),
 	}, nil
 }
