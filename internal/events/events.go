@@ -514,6 +514,13 @@ func contiguousRun(all []Event, watermark uint64, acked map[uint64]bool) (seq ui
 	blocked := false
 	for _, event := range all {
 		if event.Seq <= watermark {
+			// Already consumed. Remember the id anyway: if the run advances no further
+			// than here — a consumer retrying an ack it already made names only ids at
+			// or below the watermark — the result must still name the event the cursor
+			// sits on. ThroughID naming the event behind ThroughSeq is an invariant
+			// every other ack path holds, and reporting an empty one is the same class
+			// of wrong-output bug as #19.
+			throughID = event.ID
 			continue
 		}
 		switch {

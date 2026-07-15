@@ -526,6 +526,42 @@ func TestAckIDsToleratesDuplicateAndAlreadyAckedIDs(t *testing.T) {
 	if again.Changed || again.AckedCount != 0 {
 		t.Errorf("re-ack at the watermark reported %+v, want no change", again)
 	}
+	if again.ThroughID != "e3" {
+		t.Errorf("ThroughID=%q, want e3: a no-op ack still names where the cursor sits", again.ThroughID)
+	}
+}
+
+// A consumer retrying an ack it already made names only ids at or below the watermark.
+// Nothing advances — correct — but the result must still name the event the cursor sits
+// on. ThroughID naming the event behind ThroughSeq is an invariant every other ack path
+// holds; breaking it here would print "already at or past  (seq 3)" with a hole where the
+// id belongs, and emit through_id:"" beside a populated through_seq for anything parsing
+// the JSON. Reporting a wrong or empty id is the failure class #19 was about.
+func TestAckIDsNamesTheWatermarkWhenNothingAdvances(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "stale", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("stale", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AckIDs("stale", "consumer", []string{"e1", "e2", "e3"}, false); err != nil {
+		t.Fatal(err)
+	}
+	// The retry: every id named is already consumed.
+	result, err := store.AckIDs("stale", "consumer", []string{"e1", "e2"}, false)
+	if err != nil {
+		t.Fatalf("re-acking consumed ids errored: %v", err)
+	}
+	if result.Changed || result.AckedCount != 0 {
+		t.Errorf("result = %+v, want no change", result)
+	}
+	if result.ThroughID != "e3" || result.ThroughSeq != 3 {
+		t.Errorf("ThroughID=%q ThroughSeq=%d, want e3/3 — the result must name the event "+
+			"the cursor actually sits on", result.ThroughID, result.ThroughSeq)
+	}
 }
 
 // An unknown id is a caller error and must name the id, exactly as --through does.

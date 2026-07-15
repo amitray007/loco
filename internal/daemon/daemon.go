@@ -359,6 +359,17 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode ack request: " + err.Error()})
 			return
 		}
+		// through and ids mean different things — a watermark versus the set you
+		// processed — so a request carrying both is ambiguous. Picking one silently would
+		// hand a caller that meant "watermark" the contiguous-run semantics instead, which
+		// is the silent-wrong-behaviour class this bus keeps trying to close. The CLI and
+		// MCP both reject it before it gets here; enforce it where the invariant belongs
+		// rather than trusting two callers to keep agreeing.
+		if (request.Through == "") == (len(request.IDs) == 0) {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion,
+				Error: "ack requires exactly one of through (watermark) or ids (the ids you processed)"})
+			return
+		}
 		var result events.AckResult
 		var err error
 		if len(request.IDs) > 0 {

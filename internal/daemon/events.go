@@ -37,8 +37,9 @@ func EventsPeek(ctx context.Context, socket string, timeout time.Duration, topic
 }
 
 // EventsAck acks by watermark (through, everything at or below it) or by processed ids
-// (ids, the longest contiguous run). Exactly one of through/ids is set; ids wins if both
-// are, though the CLI rejects that combination before it reaches here.
+// (ids, the longest contiguous run). Exactly one must be set: the daemon rejects a request
+// carrying both or neither, since guessing which a caller meant is how an ack consumes
+// something nobody processed.
 func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string, ids []string, allowSkip bool) (events.AckResult, error) {
 	request := struct {
 		Topic     string   `json:"topic"`
