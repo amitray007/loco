@@ -104,6 +104,52 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// Verbs each subcommand group accepts, in the order its usage line lists them.
+// These are the single source of truth: the usage string is rendered from the
+// list rather than hand-written beside the switch, so a verb cannot be added to
+// one and forgotten in the other. Keep each list in sync with its switch.
+//
+// These lists cover every verb the group dispatches, which is deliberately not
+// the same set as the top-level `usage` text. `daemon watchdog` is invoked by a
+// launchd/systemd timer (see launchd.RenderWatchdogPlist), not typed by hand, so
+// it is listed here — asking a group what it accepts should not omit a verb that
+// works — but stays out of the top-level help, which is for verbs people choose
+// to run. Its absence there is intentional, not drift.
+var (
+	daemonVerbs   = []string{"install", "uninstall", "status", "run", "watchdog"}
+	registryVerbs = []string{"put", "list"}
+	cronVerbs     = []string{"add", "list", "run-now", "remove", "pause", "resume"}
+	svcVerbs      = []string{"add", "list", "start", "stop", "restart", "remove"}
+	eventsVerbs   = []string{"emit", "read", "peek", "ack", "list"}
+)
+
+// groupUsage renders the usage line for a subcommand group, e.g.
+// "usage: loco cron add|list|run-now|remove|pause|resume".
+func groupUsage(group string, verbs []string) string {
+	return "usage: loco " + group + " " + strings.Join(verbs, "|")
+}
+
+// isHelpArg reports whether arg asks for help. Subcommand groups route these to
+// their usage line; without it `loco cron --help` errors as an unknown verb,
+// which sends people looking for a removal verb that does exist.
+func isHelpArg(arg string) bool {
+	return arg == "help" || arg == "--help" || arg == "-h"
+}
+
+// groupHelp prints a group's usage to stdout and returns 0. Bare `loco cron`
+// (no args) is a usage error and prints to stderr with exit 1; an explicit
+// `loco cron --help` is a successful request and prints to stdout with exit 0.
+func groupHelp(group string, verbs []string, stdout io.Writer) int {
+	_, _ = fmt.Fprintln(stdout, groupUsage(group, verbs))
+	return 0
+}
+
+// groupUsageError prints a group's usage to stderr and returns 1.
+func groupUsageError(group string, verbs []string, stderr io.Writer) int {
+	_, _ = fmt.Fprintln(stderr, groupUsage(group, verbs))
+	return 1
+}
+
 // stringList is a flag.Value that accumulates repeated flag occurrences, e.g.
 // --env A=1 --env B=2.
 type stringList []string
@@ -195,8 +241,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprint(stderr, "usage: loco daemon install|uninstall|status|run\n")
-		return 1
+		return groupUsageError("daemon", daemonVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("daemon", daemonVerbs, stdout)
 	}
 
 	switch args[0] {
@@ -315,8 +363,10 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 
 func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco registry put|list")
-		return 1
+		return groupUsageError("registry", registryVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("registry", registryVerbs, stdout)
 	}
 
 	switch args[0] {
@@ -403,8 +453,10 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 
 func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco cron add|list|run-now")
-		return 1
+		return groupUsageError("cron", cronVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("cron", cronVerbs, stdout)
 	}
 	switch args[0] {
 	case "add":
@@ -670,8 +722,10 @@ func removeJob(p paths.Paths, name, kind string, jsonOut bool, stdout, stderr io
 
 func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco svc add|list|start|stop|restart")
-		return 1
+		return groupUsageError("svc", svcVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("svc", svcVerbs, stdout)
 	}
 	switch args[0] {
 	case "add":
@@ -806,8 +860,10 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 
 func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco events emit|read|ack")
-		return 1
+		return groupUsageError("events", eventsVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("events", eventsVerbs, stdout)
 	}
 	switch args[0] {
 	case "emit":

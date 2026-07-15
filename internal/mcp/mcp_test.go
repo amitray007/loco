@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -95,7 +96,7 @@ func TestNotificationsInitializedGetsNoResponse(t *testing.T) {
 	}
 }
 
-func TestToolsListReturnsAllSixTools(t *testing.T) {
+func TestToolsListReturnsEveryTool(t *testing.T) {
 	responses := runLines(t, "/nonexistent.sock", []string{
 		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 	})
@@ -113,7 +114,8 @@ func TestToolsListReturnsAllSixTools(t *testing.T) {
 	}
 	wantNames := map[string]bool{
 		"loco_status": false, "loco_events_emit": false, "loco_events_read": false,
-		"loco_events_ack": false, "loco_cron_list": false, "loco_svc_list": false,
+		"loco_events_peek": false, "loco_events_ack": false, "loco_cron_list": false,
+		"loco_svc_list": false,
 	}
 	if len(result.Tools) != len(wantNames) {
 		t.Fatalf("got %d tools, want %d: %+v", len(result.Tools), len(wantNames), result.Tools)
@@ -289,6 +291,57 @@ func TestToolsCallEventsEmitThenReadRoundTrip(t *testing.T) {
 	}
 	if string(read.Events[0].Payload) != `{"value":42}` {
 		t.Fatalf("payload = %s", read.Events[0].Payload)
+	}
+}
+
+// loco's guidance is to prefer peek over read for inspection, because read mints
+// a cursor and a live cursor pins its unacked events from compaction. Agents on
+// the MCP surface had no peek tool, so their only read path was the one that
+// creates the cursor the docs warn about. The tool is only worth having if it
+// returns the events WITHOUT the side effect, so assert both halves.
+func TestToolsCallEventsPeekReturnsEventsWithoutCreatingACursor(t *testing.T) {
+	p := startTestDaemon(t)
+	emitParams := `{"name":"loco_events_emit","arguments":{"topic":"mcp.peek","id":"evt-1","data":{"value":7}}}`
+	peekParams := `{"name":"loco_events_peek","arguments":{"topic":"mcp.peek"}}`
+	responses := runLines(t, p.Socket, []string{
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":%s}`, emitParams),
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":%s}`, peekParams),
+	})
+	if len(responses) != 2 {
+		t.Fatalf("got %d responses, want 2", len(responses))
+	}
+
+	var peekResult toolCallResult
+	if err := json.Unmarshal(responses[1].Result, &peekResult); err != nil {
+		t.Fatalf("decode peek tool result: %v", err)
+	}
+	if peekResult.IsError {
+		t.Fatalf("peek reported an error: %+v", peekResult.Content)
+	}
+	var peeked struct {
+		Events []struct {
+			ID      string          `json:"id"`
+			Payload json.RawMessage `json:"payload"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(peekResult.Content[0].Text), &peeked); err != nil {
+		t.Fatalf("decode peek payload: %v", err)
+	}
+	if len(peeked.Events) != 1 || peeked.Events[0].ID != "evt-1" {
+		t.Fatalf("peek = %+v", peeked)
+	}
+	if string(peeked.Events[0].Payload) != `{"value":7}` {
+		t.Fatalf("payload = %s", peeked.Events[0].Payload)
+	}
+
+	// The point of the tool: no cursor on disk. A read would have left one here.
+	cursorDir := filepath.Join(p.EventsDir, ".cursors", "mcp.peek")
+	entries, err := os.ReadDir(cursorDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read cursor dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("peek created %d cursors, want 0: %+v", len(entries), entries)
 	}
 }
 
