@@ -79,16 +79,30 @@ timestamp. That's what makes the producer idempotent.
 ```sh
 loco events read your.topic --cursor your-cursor --holder your-consumer --json
 # … do the work …
-loco events ack your.topic --cursor your-cursor --through <event-id>
+loco events ack your.topic --cursor your-cursor --ids <ids you processed>
 ```
 
 - **Ack only after the work is durably done.** Failure → don't ack → next run retries.
+- **Ack with `--ids`, not `--through`.** Pass the ids you actually processed; the cursor
+  advances over the longest **contiguous run** of them and stops at the first event you
+  did not name:
+
+  ```sh
+  loco events ack your.topic --cursor your-cursor --ids evt-1,evt-2,evt-4,evt-5
+  # cursor advanced through evt-2 (seq 2), consuming 2 event(s)
+  # note: 2 acked id(s) were not consumed — evt-3 is unprocessed and blocks them;
+  #       they will be redelivered until it clears.
+  ```
+
+  Ids above the gap are **redelivered**, so your processing must tolerate seeing an event
+  twice — which it already must, since a crash mid-batch redelivers everything unacked.
 - **`ack --through` is a watermark, not a receipt.** It consumes that event *and every
-  event below it*. If you drain a batch and one item fails, ack the highest
-  **contiguously succeeded** id — not the batch's last id, which would silently consume
-  the failure. loco refuses an ack that reaches past events your cursor never read
-  (`--allow-skip` overrides), and every ack reports how many events it consumed, but it
-  cannot tell "read" from "processed": only you know which items succeeded.
+  event below it*, processed or not. If you drain a batch and one item fails, `--through
+  <last id>` silently consumes the failure. loco refuses an ack that reaches past events
+  your cursor never read (`--allow-skip` overrides), but that check cannot help here: it
+  answers "did you read it?", and the failure is "did you process it?". Only you know
+  which items succeeded — which is what `--ids` is for. Use `--through` when you processed
+  the whole batch.
 - **Inspect with `peek`, not `read`.** `loco events peek your.topic --tail 5` creates no
   cursor. A `read` with a throwaway cursor name mints one that pins retention 30 days.
 - **Await instead of polling:** `loco events read your.topic --cursor c --wait
