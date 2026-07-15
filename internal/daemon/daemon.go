@@ -203,7 +203,7 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			Version:       state.Version,
 		})
 	case "status.overview":
-		result, err := buildOverview(state, started, p, registryStore, serviceManager, eventStore)
+		result, err := buildOverview(state, started, p, registryStore, cronManager, serviceManager, eventStore)
 		if err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return

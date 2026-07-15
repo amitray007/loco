@@ -498,10 +498,22 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		}
 		sort.Strings(names)
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
+		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND\tSTATE")
 		for _, name := range names {
-			spec, _ := cronjob.DecodeSpec(jobs[name].Spec)
-			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
+			// A job whose spec will not decode cannot be scheduled and never fires.
+			// This used to discard the error and print the zero-value spec, so such a
+			// job rendered as blank columns — the one view that should expose it
+			// swallowed the evidence. Report the reason instead.
+			spec, err := cronjob.DecodeSpec(jobs[name].Spec)
+			if err != nil {
+				_, _ = fmt.Fprintf(table, "%s\t-\t-\tinvalid: %v\n", name, err)
+				continue
+			}
+			state := "scheduled"
+			if spec.Paused {
+				state = "paused"
+			}
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "), state)
 		}
 		_ = table.Flush()
 		return 0
