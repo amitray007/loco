@@ -1,21 +1,26 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
-  disable-all: true
+  default: none
   enable:
+    - errcheck
     - govet
     - ineffassign
+    - misspell
     - staticcheck
     - unused
-    - misspell
-    - errcheck
-    - gofmt
+  exclusions:
+    rules:
+      # Tests routinely ignore errors on setup/teardown calls where a failure would
+      # surface as a test failure anyway; enforcing errcheck there is noise.
+      - path: _test\.go
+        linters:
+          - errcheck
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-  max-issues-per-linter: 0
-  max-same-issues: 0
+# gofmt is a formatter in v2, not a linter. CI also enforces `gofmt -l` directly.
+formatters:
+  enable:
+    - gofmt

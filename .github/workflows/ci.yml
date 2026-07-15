@@ -86,10 +86,14 @@ jobs:
         with:
           go-version: '1.26'
 
+      # v9 + golangci-lint v2 are required: the v6 action pulled a lint binary built
+      # with go1.24, which refuses to load a module targeting go1.26.1
+      # ("the Go language version used to build golangci-lint is lower than the
+      # targeted Go version"). Pin the major so a future v1-era default can't regress it.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
 
   govulncheck:
     runs-on: ubuntu-latest
