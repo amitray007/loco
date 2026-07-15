@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -691,6 +695,114 @@ func TestNotifyRejectsReservedGroup(t *testing.T) {
 	code := run([]string{"--config-dir", root, "notify", "T", "B", "--group", "job-failure:worker"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "reserved") {
 		t.Fatalf("reserved group not rejected: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+// A subcommand group's usage line must list exactly the verbs its switch
+// dispatches. The usage lines used to be hand-written beside the switch and had
+// drifted in four of five groups: `cron` omitted remove/pause/resume, `svc`
+// omitted remove, `events` omitted peek/list, and `daemon` omitted watchdog. A
+// wrong usage line is worse than a missing one — it asserts a verb does not
+// exist, so nobody tries it.
+//
+// The switch is the ground truth, so this reads the case clauses out of the
+// source with go/ast and compares them to the declared verb list. Driving the
+// CLI instead would not work: a verb missing from the list is simply never
+// exercised, so the drift that matters would pass unnoticed.
+func TestGroupUsageListsEveryDispatchableVerb(t *testing.T) {
+	groups := map[string]struct {
+		fn    string
+		verbs []string
+	}{
+		"daemon":   {"runDaemon", daemonVerbs},
+		"registry": {"runRegistry", registryVerbs},
+		"cron":     {"runCron", cronVerbs},
+		"svc":      {"runService", svcVerbs},
+		"events":   {"runEvents", eventsVerbs},
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+
+	for group, want := range groups {
+		cases := switchCaseVerbs(t, file, want.fn)
+		if len(cases) == 0 {
+			t.Errorf("%s: found no switch cases in %s (test is looking in the wrong place)",
+				group, want.fn)
+			continue
+		}
+		declared := map[string]bool{}
+		for _, v := range want.verbs {
+			declared[v] = true
+		}
+		for _, verb := range cases {
+			if !declared[verb] {
+				t.Errorf("loco %s %s: dispatched by %s but missing from its usage line; add it to %sVerbs",
+					group, verb, want.fn, group)
+			}
+			delete(declared, verb)
+		}
+		for verb := range declared {
+			t.Errorf("loco %s %s: listed in usage but no case in %s handles it",
+				group, verb, want.fn)
+		}
+	}
+}
+
+// switchCaseVerbs returns every string literal appearing in a case clause of
+// the top-level switch inside the named function, e.g. `case "pause", "resume":`
+// yields both verbs. Help arms are skipped: they are routing, not verbs.
+func switchCaseVerbs(t *testing.T, file *ast.File, fnName string) []string {
+	t.Helper()
+	var verbs []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != fnName {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			clause, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			for _, expr := range clause.List {
+				lit, ok := expr.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				verb, err := strconv.Unquote(lit.Value)
+				if err != nil || isHelpArg(verb) {
+					continue
+				}
+				verbs = append(verbs, verb)
+			}
+			return true
+		})
+	}
+	return verbs
+}
+
+// `loco cron --help` used to error with `unknown cron command "--help"`, which
+// broke the natural discovery path: the bare usage line was stale, so the one
+// way left to find `cron remove` was to guess it.
+func TestSubcommandGroupsRouteHelpToUsage(t *testing.T) {
+	root := t.TempDir()
+	for _, group := range []string{"daemon", "registry", "cron", "svc", "events"} {
+		for _, helpArg := range []string{"help", "--help", "-h"} {
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--config-dir", root, group, helpArg}, &stdout, &stderr)
+			if code != 0 {
+				t.Errorf("loco %s %s: exit %d, want 0 (stderr=%q)",
+					group, helpArg, code, strings.TrimSpace(stderr.String()))
+			}
+			if !strings.Contains(stdout.String(), "usage: loco "+group) {
+				t.Errorf("loco %s %s: stdout lacks usage line, got %q",
+					group, helpArg, strings.TrimSpace(stdout.String()))
+			}
+		}
 	}
 }
 
