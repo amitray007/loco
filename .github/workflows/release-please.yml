@@ -1,0 +1,236 @@
+name: Release Please
+
+# The automatic release path for loco. How it works:
+#
+#   On every push to main, release-please-action inspects conventional-commit
+#   history since the last tag and either updates the open "Release PR" in
+#   place or opens a fresh one with the proposed version + CHANGELOG entry.
+#   Merging that Release PR runs this workflow again; that run creates the git
+#   tag + GitHub release, and `publish` builds the binaries, attaches them to
+#   the loco release, and publishes the Homebrew formula to the public tap.
+#
+# Version bumping (see the `bump` step for the full rationale):
+#
+#   Default            → patch      (0.1.1 → 0.1.2) via always-bump-patch
+#   PR labelled `minor`→ minor      (0.1.1 → 0.2.0)
+#   PR labelled `major`→ major      (0.1.1 → 1.0.0)
+#
+# Why the formula lives on the tap, not here:
+#
+#   loco is a PRIVATE repo. Homebrew fetches release assets unauthenticated,
+#   so a formula pointing at this repo's assets 404s (verified). The binaries
+#   are therefore ALSO uploaded to a release on the public homebrew-tap repo,
+#   and the formula points there. Assets are still attached to the loco
+#   release for provenance. If loco goes public, the tap release becomes
+#   redundant and the formula URLs can point back here.
+#
+# Required secret:
+#
+#   HOMEBREW_TAP_TOKEN — fine-grained PAT with `contents: write` on
+#     amitray007/homebrew-tap. WITHOUT IT THE PUBLISH JOB FAILS: the default
+#     GITHUB_TOKEN is scoped to this repo and cannot write to another one.
+#     This is the exact failure that broke the v0.1.0 and v0.1.1 releases.
+#   RELEASE_PLEASE_TOKEN — optional; only needed if main is branch-protected
+#     such that github-actions[bot] cannot open PRs. Falls back to GITHUB_TOKEN.
+
+on:
+  push:
+    branches: [main]
+
+# release-please writes git state (the Release PR branch); concurrent runs
+# would race. cancel-in-progress:false lets an in-flight release finish rather
+# than being killed halfway through publishing.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+    steps:
+      # ── Determine the version bump from the merged PR's labels ────────────
+      # Look up the PR that produced this push commit, take the highest bump
+      # label, and export `release_as`. Two-run flow:
+      #
+      #   Run 1 — a feature PR merges. It may carry a major/minor label, so
+      #           this step computes and exports the override version.
+      #   Run 2 — the Release PR ("chore(release): loco vX.Y.Z") merges. It
+      #           carries NO bump label → release_as="" → release-please just
+      #           tags the version it already baked into the PR. No misfire.
+      #
+      # Empty-string safety: release-please-action reads release-as via
+      # core.getInput() and gates on `if (releaseAs)`. "" is falsy in JS, so it
+      # is treated as unset and always-bump-patch from the config takes over.
+      # This is what makes "patch by default" work without computing it here.
+      - name: Resolve version bump from PR labels
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Returns an array of PRs associated with the commit; [] for a direct push.
+          LABELS=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+            --jq '.[0].labels[].name // empty' 2>/dev/null || echo "")
+
+          echo "[bump] commit=${SHA}"
+          echo "[bump] PR labels: ${LABELS:-<none>}"
+
+          # Highest label wins: major > minor > patch. -x anchors the match so a
+          # label like "minor-cleanup" cannot be mistaken for "minor".
+          BUMP=""
+          if echo "$LABELS" | grep -qx "major"; then
+            BUMP="major"
+          elif echo "$LABELS" | grep -qx "minor"; then
+            BUMP="minor"
+          fi
+
+          if [ -z "$BUMP" ]; then
+            echo "[bump] no major/minor label → release_as= (always-bump-patch applies)"
+            echo "release_as=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Read the current version from the manifest at the merge commit, so
+          # the computation matches what release-please itself will see.
+          CURRENT=$(gh api "repos/${REPO}/contents/.release-please-manifest.json?ref=${SHA}" \
+            --jq '.content' | base64 -d | python3 -c "import sys,json; print(json.load(sys.stdin)['.'])")
+          echo "[bump] current version: $CURRENT"
+
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          if [ "$BUMP" = "major" ]; then
+            NEXT="$((MAJOR + 1)).0.0"
+          else
+            NEXT="${MAJOR}.$((MINOR + 1)).0"
+          fi
+          echo "[bump] ${BUMP} → release_as=${NEXT}"
+          echo "release_as=${NEXT}" >> "$GITHUB_OUTPUT"
+
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          release-as: ${{ steps.bump.outputs.release_as }}
+
+  publish:
+    # Only runs on the push that actually created a release (the Release PR
+    # merge). Every other push just updates the Release PR and skips this.
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.release-please.outputs.version }}
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          # Don't leave a credential-bearing .git config lying around for the
+          # release build to pick up; the steps below pass tokens explicitly.
+          persist-credentials: false
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: "1.26"
+
+      # Build + attach assets to the loco release. The tap push is handled
+      # below instead of by goreleaser, because the formula must point at
+      # tap-hosted assets (see the header note on private-repo 404s).
+      - name: Build release artifacts
+        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish a release on the PUBLIC tap holding the same artifacts, so
+      # `brew install` can fetch them without auth. GitHub releases are
+      # immutable once assets attach, so re-running a version deletes and
+      # recreates rather than trying to upload over an existing asset.
+      - name: Publish assets to the tap release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAP_TAG="loco-v${VERSION}"
+          gh release delete "$TAP_TAG" --repo amitray007/homebrew-tap --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAP_TAG" \
+            --repo amitray007/homebrew-tap \
+            --title "loco v${VERSION}" \
+            --notes "Binaries for loco v${VERSION}. Install: \`brew install amitray007/tap/loco\`" \
+            dist/loco_${VERSION}_darwin_arm64.tar.gz \
+            dist/loco_${VERSION}_darwin_amd64.tar.gz \
+            dist/loco_${VERSION}_linux_arm64.tar.gz \
+            dist/loco_${VERSION}_linux_amd64.tar.gz
+
+      - name: Render and push the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAP_TAG="loco-v${VERSION}"
+
+          # Pull each artifact's checksum from goreleaser's checksums.txt rather
+          # than recomputing, so the formula can only ever agree with what was
+          # actually uploaded. Fail loudly if one is missing — a formula with an
+          # empty sha256 would install a silently unverified binary.
+          # -F: the filename is a literal, not a pattern. Version strings can
+          # contain regex metacharacters (`.`, and `+` in prerelease builds),
+          # which silently break an -E match.
+          sha_for() {
+            local f="$1" s
+            s=$(awk -v want="$f" '$2 == want { print $1 }' dist/checksums.txt)
+            if [ -z "$s" ]; then echo "missing checksum for ${f}" >&2; exit 1; fi
+            echo "$s"
+          }
+          D_ARM=$(sha_for "loco_${VERSION}_darwin_arm64.tar.gz")
+          D_AMD=$(sha_for "loco_${VERSION}_darwin_amd64.tar.gz")
+          L_ARM=$(sha_for "loco_${VERSION}_linux_arm64.tar.gz")
+          L_AMD=$(sha_for "loco_${VERSION}_linux_amd64.tar.gz")
+
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/amitray007/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed -e "s|{{VERSION}}|${VERSION}|g" \
+              -e "s|{{TAG}}|${TAP_TAG}|g" \
+              -e "s|{{SHA256_DARWIN_ARM64}}|${D_ARM}|g" \
+              -e "s|{{SHA256_DARWIN_AMD64}}|${D_AMD}|g" \
+              -e "s|{{SHA256_LINUX_ARM64}}|${L_ARM}|g" \
+              -e "s|{{SHA256_LINUX_AMD64}}|${L_AMD}|g" \
+              packaging/loco-formula.template.rb > tap/Formula/loco.rb
+
+          # Guard against a template placeholder surviving substitution.
+          if grep -q "{{" tap/Formula/loco.rb; then
+            echo "unsubstituted placeholder in rendered formula:" >&2
+            grep -n "{{" tap/Formula/loco.rb >&2
+            exit 1
+          fi
+
+          cd tap
+          git config user.name "loco-release-bot"
+          git config user.email "loco-release-bot@users.noreply.github.com"
+          git add Formula/loco.rb
+          if git diff --staged --quiet; then
+            echo "formula unchanged; nothing to push"
+            exit 0
+          fi
+          git commit -m "loco ${VERSION}"
+          git push origin HEAD:main

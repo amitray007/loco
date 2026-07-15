@@ -95,6 +95,74 @@ jobs:
         with:
           version: v2.12.2
 
+  # Validate the release pipeline itself on every PR. Without this, a typo in
+  # .goreleaser.yaml or the formula template only surfaces during an actual
+  # release — after the tag exists and the version has been burned.
+  release-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Validate goreleaser config
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
+
+      - name: Build a snapshot release
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish
+
+      # Render the formula against the snapshot's real checksums and assert the
+      # result is valid Ruby with no leftover placeholders — the same rendering
+      # the release performs, minus the push.
+      - name: Render and validate the Homebrew formula
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r .version dist/metadata.json)
+          echo "snapshot version: $VERSION"
+          sha_for() {
+            local f="$1" s
+            s=$(awk -v want="$f" '$2 == want { print $1 }' dist/checksums.txt)
+            if [ -z "$s" ]; then echo "missing checksum for ${f}" >&2; exit 1; fi
+            echo "$s"
+          }
+          sed -e "s|{{VERSION}}|${VERSION}|g" \
+              -e "s|{{TAG}}|loco-v${VERSION}|g" \
+              -e "s|{{SHA256_DARWIN_ARM64}}|$(sha_for "loco_${VERSION}_darwin_arm64.tar.gz")|g" \
+              -e "s|{{SHA256_DARWIN_AMD64}}|$(sha_for "loco_${VERSION}_darwin_amd64.tar.gz")|g" \
+              -e "s|{{SHA256_LINUX_ARM64}}|$(sha_for "loco_${VERSION}_linux_arm64.tar.gz")|g" \
+              -e "s|{{SHA256_LINUX_AMD64}}|$(sha_for "loco_${VERSION}_linux_amd64.tar.gz")|g" \
+              packaging/loco-formula.template.rb > /tmp/loco.rb
+          if grep -q "{{" /tmp/loco.rb; then
+            echo "unsubstituted placeholder in rendered formula:" >&2
+            grep -n "{{" /tmp/loco.rb >&2
+            exit 1
+          fi
+          ruby -c /tmp/loco.rb
+
+      - name: Validate release-please config
+        run: |
+          set -euo pipefail
+          jq -e . release-please-config.json > /dev/null
+          jq -e . .release-please-manifest.json > /dev/null
+          # The manifest version must be the single source release-please reads;
+          # an empty or absent "." key silently restarts versioning at 0.0.1.
+          V=$(jq -r '."."' .release-please-manifest.json)
+          if [ -z "$V" ] || [ "$V" = "null" ]; then
+            echo "manifest is missing the '.' version key" >&2
+            exit 1
+          fi
+          echo "manifest version: $V"
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
