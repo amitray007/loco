@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"github.com/amitray007/loco/internal/paths"
 	"os"
 	"path/filepath"
 	"sync"
@@ -89,7 +90,7 @@ func TestTailStartsAtTailAndPushesNewEvents(t *testing.T) {
 // This also proves finding 2 (ctx-aware startup): cancelling ctx must make runTail
 // return promptly — bounded by the retry backoff (~200ms), not by callTimeout (5s) or
 // any unbounded hang — even though the daemon never becomes reachable.
-func TestTailDownAtStartupNeverReplaysBacklog(t *testing.T) {
+func TestTailDownAtStartupPushesNothingAndExitsPromptly(t *testing.T) {
 	p := startTestDaemon(t)
 	ctx := context.Background()
 
@@ -199,5 +200,85 @@ func TestTailIgnoresUnconfiguredTopics(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("configured topic not pushed: %v", c.snapshot())
+	}
+}
+
+// The real D4 scenario: daemon is DOWN when the tail starts, a backlog already exists,
+// and the daemon LATER comes up. The buggy code latches a false high-water 0 and replays
+// the backlog on the first successful poll. The fixed code retries and starts at the tail.
+func TestDaemonDownThenUp_NoBacklogReplay(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-disc-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 1: bring a daemon up, write a real backlog, take it DOWN.
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() { done1 <- daemon.Run(ctx1, p, "disc-test") }()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := daemon.Status(context.Background(), p.Socket, 50*time.Millisecond); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, id := range []string{"old1", "old2", "old3"} {
+		if _, err := daemon.EventsEmit(context.Background(), p.Socket, 5*time.Second,
+			events.EmitInput{Topic: "chan.dz", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancel1()
+	<-done1
+	_ = os.Remove(p.Socket) // daemon is now down; socket unreachable
+
+	// Phase 2: start the tail against the DOWN daemon.
+	tailCtx, cancelTail := context.WithCancel(context.Background())
+	defer cancelTail()
+	c := &collector{}
+	go runTail(tailCtx, p.Socket, ChannelConfig{Topics: []string{"chan.dz"}, Poll: 50 * time.Millisecond}, c.push)
+	time.Sleep(400 * time.Millisecond) // tail is stuck / has latched its mark
+
+	// Phase 3: daemon comes back UP, backlog intact.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan error, 1)
+	go func() { done2 <- daemon.Run(ctx2, p, "disc-test") }()
+	t.Cleanup(func() { cancel2(); <-done2 })
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := daemon.Status(context.Background(), p.Socket, 50*time.Millisecond); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Let the tail poll the now-reachable daemon several times.
+	time.Sleep(1 * time.Second)
+
+	if got := c.snapshot(); len(got) != 0 {
+		t.Fatalf("D4 VIOLATED: backlog replayed after daemon came back up: %v", got)
+	}
+
+	// And a genuinely new event still flows.
+	if _, err := daemon.EventsEmit(context.Background(), p.Socket, 5*time.Second,
+		events.EmitInput{Topic: "chan.dz", ID: "new1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(c.snapshot()) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := c.snapshot()
+	if len(got) != 1 || got[0] != "chan.dz/new1" {
+		t.Fatalf("want exactly [chan.dz/new1], got %v", got)
 	}
 }
