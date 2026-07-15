@@ -16,10 +16,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
 
@@ -48,10 +48,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
 
@@ -79,21 +79,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
 
       # v9 + golangci-lint v2 are required: the v6 action pulled a lint binary built
       # with go1.24, which refuses to load a module targeting go1.26.1
       # ("the Go language version used to build golangci-lint is lower than the
-      # targeted Go version"). Pin the major so a future v1-era default can't regress it.
+      # targeted Go version"). The SHA below is a v9 release; keep it there.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
+
+      # A tag is mutable: `@v7` re-resolves every run, so moving it — via a compromised
+      # maintainer account or a token leak in the action's own repo — executes new code
+      # here with no diff, no PR, and no Dependabot alert. This repo's CI has
+      # contents:write and the release path handles a tap PAT, so that is a real target.
+      # ci.yml drifted to 13 floating tags while release-please.yml pinned SHAs (#18);
+      # the two styles are indistinguishable in a Dependabot diff, so only a check
+      # catches the drift.
+      - name: Actions are pinned to SHAs
+        run: |
+          set -euo pipefail
+          # Match `uses: owner/repo@ref`, ignoring local (./) and docker:// actions.
+          unpinned=$(grep -rEn '^\s*-?\s*uses:\s*[^./][^@]+@' .github/workflows/ \
+            | grep -vE '@[0-9a-f]{40}(\s|$)' || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error::Actions must be pinned to a full 40-character commit SHA (#18)."
+            echo "Add a trailing '# vX.Y.Z' comment; Dependabot keeps both updated."
+            echo "$unpinned"
+            exit 1
+          fi
+          echo "All actions are pinned to full commit SHAs."
 
   # Validate the release pipeline itself on every PR. Without this, a typo in
   # .goreleaser.yaml or the formula template only surfaces during an actual
@@ -102,18 +123,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # goreleaser reads tags and commit history to derive its version.
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
 
       - name: Validate goreleaser config
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
           args: check
@@ -144,7 +165,7 @@ jobs:
           echo "PROBE_VERSION=${NEXT}" >> "$GITHUB_ENV"
 
       - name: Build release artifacts
-        uses: goreleaser/goreleaser-action@v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
           args: release --clean --skip=publish --skip=validate
@@ -219,10 +240,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26'
 
