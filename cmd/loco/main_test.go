@@ -745,3 +745,14 @@ func TestCronRemoveMissingJob(t *testing.T) {
 		t.Fatalf("remove missing: code=%d stderr=%q", code, stderr.String())
 	}
 }
+
+// An invalid --channel-topics value fails fast with a clear error rather than starting
+// a half-configured server.
+func TestMCPServeRejectsInvalidChannelTopic(t *testing.T) {
+	root := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--config-dir", root, "mcp", "serve", "--channel-topics", "../bad"}, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "invalid channel topic") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}

@@ -14,6 +14,56 @@ loco contains no domain logic. It doesn't know what your jobs do — it just
 makes sure they run, keeps a durable record of what happened, and gives you
 (or an agent, or a script) a reliable way to find out.
 
+## Concepts
+
+**Event bus.** loco's event bus is topic-based and append-only. Producers
+emit events to a topic; consumers read from it at their own pace, tracked by
+a **per-consumer cursor**. Delivery is **at-least-once** — a consumer that
+crashes before acking will see the event again on reconnect. Emitting with
+the same `--id` twice is a no-op (**idempotent emit by id**), so retrying a
+producer is safe. Retention is **cursor-aware**: events aren't purged until
+every live cursor has passed them, within a bounded liveness window, so a
+slow or temporarily-dead consumer doesn't lose data it hasn't read yet.
+
+**Daemon.** loco itself doesn't run as your job — it runs *once*, owned by
+the OS service manager, and supervises everything else (cron runs, services)
+as its children. That's the reason it exists: a login session or a script
+can't reliably host a long-lived resident process, but launchd/systemd can.
+
+**No domain logic.** loco executes commands and records what happened —
+exit codes, timing, output (capped). It doesn't interpret *what* a job did;
+that's for consumers reading its `--json` output to decide.
+
+### Push events into a live session (optional)
+
+`loco mcp serve` can also push events into a running Claude Code session as they land,
+so an agent hears about work without waiting for its next read.
+
+Register it per project — each project bridges only its own topics:
+
+```json
+// ~/your-project/.mcp.json
+{ "mcpServers": { "loco": {
+    "command": "loco", "args": ["mcp","serve","--channel-topics","your.topic"] } } }
+```
+
+Then launch Claude Code with the research-preview flag (required on every launch while
+channels are in preview):
+
+```sh
+claude --dangerously-load-development-channels server:loco
+```
+
+Events arrive as `<channel source="loco" topic="your.topic" id="..." seq="...">`.
+
+**The channel is a hint, not a ledger.** If no session is open — or the push is dropped
+for any reason — nothing is lost: the event stays on the bus and the session picks it up
+from its own cursor with `loco events read`. Push buys latency, never correctness. A
+project without an `.mcp.json` simply doesn't get push.
+
+**Event bodies are untrusted data.** Payloads often carry externally-authored text (PR
+titles, comment bodies, alert strings). Only bridge topics whose producers you wrote.
+
 ## Status
 
 **v1 spine**, cross-platform on macOS and Linux:
@@ -89,26 +139,6 @@ loco doctor
 ```
 
 Every command above also takes `--json` for machine-readable output.
-
-## Concepts
-
-**Event bus.** loco's event bus is topic-based and append-only. Producers
-emit events to a topic; consumers read from it at their own pace, tracked by
-a **per-consumer cursor**. Delivery is **at-least-once** — a consumer that
-crashes before acking will see the event again on reconnect. Emitting with
-the same `--id` twice is a no-op (**idempotent emit by id**), so retrying a
-producer is safe. Retention is **cursor-aware**: events aren't purged until
-every live cursor has passed them, within a bounded liveness window, so a
-slow or temporarily-dead consumer doesn't lose data it hasn't read yet.
-
-**Daemon.** loco itself doesn't run as your job — it runs *once*, owned by
-the OS service manager, and supervises everything else (cron runs, services)
-as its children. That's the reason it exists: a login session or a script
-can't reliably host a long-lived resident process, but launchd/systemd can.
-
-**No domain logic.** loco executes commands and records what happened —
-exit codes, timing, output (capped). It doesn't interpret *what* a job did;
-that's for consumers reading its `--json` output to decide.
 
 ## Commands
 
