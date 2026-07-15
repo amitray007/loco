@@ -230,6 +230,14 @@ Invariant across tiers: **files are the truth; tiers only change latency.**
 An agent on tier 0 sees identical data to one on tier 3, later. Falling down
 the ladder can never lose or corrupt anything.
 
+### `loco mcp serve [--channel-topics a,b] [--channel-poll D]`
+
+Runs a stdio MCP server exposing the daemon's read/emit tools to an agent. With
+`--channel-topics` (or `LOCO_CHANNEL_TOPICS`) it also declares the Claude Code
+`claude/channel` capability and pushes each named topic's new events into the session as
+they arrive. No topics = no pushes. The tail is stateless: it starts at each topic's
+current tail, creates no cursor, and never replays a backlog.
+
 **The channel adapter is the flagship.** loco's reason to exist includes
 proactively TELLING agents what it found — the loco-plugin channel server
 pushes events into live Claude Code sessions as `<channel source="loco"
