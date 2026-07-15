@@ -103,6 +103,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # goreleaser reads tags and commit history to derive its version.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -133,7 +136,10 @@ jobs:
           # include-v-in-tag: true, include-component-in-tag: false → vX.Y.Z
           NEXT="99.99.99"
           TAG="v${NEXT}"
-          git tag -f "$TAG" -m "ci release-check probe"
+          # Lightweight tag, not annotated (-m): an annotated tag needs a
+          # committer identity, which a bare runner has not configured. The tag
+          # name is all goreleaser reads.
+          git tag -f "$TAG"
           echo "probing with tag: $TAG"
           echo "PROBE_VERSION=${NEXT}" >> "$GITHUB_ENV"
 
