@@ -75,6 +75,14 @@ type AckResult struct {
 	// silent success. A consumer that upgraded and assumes strict now covers it is
 	// exactly the reader #7 was written for, so say so rather than let it infer.
 	StrictNotEnforced bool `json:"strict_not_enforced,omitempty"`
+	// HeldBack is how many ids an --ids ack named that sat ABOVE the contiguous run and
+	// were therefore not consumed. Non-zero means the consumer reported work that an
+	// earlier unprocessed event is blocking; those ids redeliver until it clears. Zero
+	// (and absent) for --through, which has no gap to hold anything back.
+	HeldBack int `json:"held_back,omitempty"`
+	// BlockedBy names the oldest unprocessed event — the one holding the watermark back.
+	// A count alone says work is stuck; the id says what to fix.
+	BlockedBy string `json:"blocked_by,omitempty"`
 }
 type CompactResult struct {
 	SchemaVersion  int      `json:"schema_version"`
@@ -379,6 +387,39 @@ var ErrAckSkipsUnread = errors.New("ack would consume events that were never rea
 func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.ack(topic, cursorName, []string{throughID}, allowSkip, false)
+}
+
+// AckIDs advances a cursor's watermark over the longest CONTIGUOUS run of the ids the
+// consumer reports processing, stopping at the first event it did not name.
+//
+// This is the half `--through` cannot express. `--through` is a watermark: a consumer
+// that drains 5, fails on the 3rd, and acks the batch's last id — the natural thing to
+// write — silently consumes the failure. #7's strict cannot object, because the consumer
+// *read* all five; reading is not processing, and only the consumer knows which succeeded.
+// AckIDs lets it say so.
+//
+// Ids named above the gap are NOT consumed: they are counted in HeldBack and redelivered
+// until the blocker clears. loco deliberately does not remember them. Redelivery is
+// already this bus's normal behaviour — a consumer that crashes mid-batch re-reads the
+// whole unacked batch, finished items included — so every consumer must already tolerate
+// re-processing. Remembering them would cost per-cursor state that grows with the gap, to
+// narrow one slice of a duplicate the bus performs on every crash anyway.
+func (s *Store) AckIDs(topic, cursorName string, ids []string, allowSkip bool) (AckResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(ids) == 0 {
+		return AckResult{}, errors.New("no event ids given; pass at least one id to ack")
+	}
+	return s.ack(topic, cursorName, ids, allowSkip, true)
+}
+
+// ack is the shared core. contiguous selects how the target watermark is derived from
+// ids: --through takes the named event outright (consuming everything below it, read or
+// not), while --ids walks the longest contiguous run and stops at the first gap.
+// Everything after that choice — strict, blast radius, persistence — is identical, and
+// keeping it in one place is what stops the two paths from drifting.
+func (s *Store) ack(topic, cursorName string, ids []string, allowSkip, contiguous bool) (AckResult, error) {
 	if err := validateComponent("topic", topic); err != nil {
 		return AckResult{}, err
 	}
@@ -389,9 +430,13 @@ func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckRes
 	if err != nil {
 		return AckResult{}, err
 	}
-	seq, ok := meta.IDs[throughID]
-	if !ok {
-		return AckResult{}, fmt.Errorf("event id %q not found on topic %q", throughID, topic)
+	acked := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		seq, ok := meta.IDs[id]
+		if !ok {
+			return AckResult{}, fmt.Errorf("event id %q not found on topic %q", id, topic)
+		}
+		acked[seq] = true
 	}
 	cursor, exists, err := s.loadCursor(topic, cursorName)
 	if err != nil {
@@ -399,6 +444,12 @@ func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckRes
 	}
 	if !exists {
 		return AckResult{}, fmt.Errorf("cursor %q does not exist; read the topic first", cursorName)
+	}
+
+	seq, throughID := meta.IDs[ids[0]], ids[0]
+	heldBack, blockedBy := 0, ""
+	if contiguous {
+		seq, throughID, heldBack, blockedBy = contiguousRun(all, cursor.LastAckedSeq, acked)
 	}
 	changed := seq > cursor.LastAckedSeq
 
@@ -443,7 +494,42 @@ func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckRes
 		ThroughID: throughID, ThroughSeq: seq, Changed: changed,
 		AckedCount: ackedCount, SkippedUnread: skippedUnread,
 		StrictNotEnforced: skippedUnread > 0 && !allowSkip && unknownReadHistory,
+		HeldBack:          heldBack, BlockedBy: blockedBy,
 	}, nil
+}
+
+// contiguousRun walks surviving events in seq order from the first above the watermark,
+// advancing while each is in acked and stopping at the first that is not. It returns the
+// new watermark (unchanged if the very first event is unacked), the id at that watermark,
+// how many acked ids sat above the stopping point, and the id that blocked them.
+//
+// It walks the events themselves rather than doing watermark+1 arithmetic. Live seqs
+// happen to be gapless today — compaction only removes a prefix, and a duplicate emit
+// returns before a seq is assigned — so arithmetic would also work, by luck. Walking the
+// events does not depend on that luck holding, and costs nothing here: the loop already
+// has the slice in hand. Same reason the blast-radius loop counts events rather than
+// differencing seqs (which is NOT luck: that one is load-bearing after compaction).
+func contiguousRun(all []Event, watermark uint64, acked map[uint64]bool) (seq uint64, throughID string, heldBack int, blockedBy string) {
+	seq = watermark
+	blocked := false
+	for _, event := range all {
+		if event.Seq <= watermark {
+			continue
+		}
+		switch {
+		case blocked:
+			// Past the gap: anything the consumer named here is work it reported but
+			// cannot have consumed, because the blocker sits below it.
+			if acked[event.Seq] {
+				heldBack++
+			}
+		case acked[event.Seq]:
+			seq, throughID = event.Seq, event.ID
+		default:
+			blocked, blockedBy = true, event.ID
+		}
+	}
+	return seq, throughID, heldBack, blockedBy
 }
 
 func (s *Store) Compact(topic string) (CompactResult, error) {

@@ -359,19 +359,27 @@ func toolDefinitions() []tool {
 		},
 		{
 			Name: "loco_events_ack",
-			Description: "Advance a topic's cursor through the given event ID, consuming it AND every event before it. " +
-				"This is a watermark, not an acknowledgment of one message: if you processed a batch and one item " +
-				"failed, ack the highest contiguously-succeeded id, not the batch's last id. Acking past an event " +
-				"you never read is refused unless allow_skip is set.",
+			Description: "Acknowledge events on a cursor. Pass exactly one of `ids` or `through`. " +
+				"PREFER `ids`: give the event IDs you actually processed, and the cursor advances over the " +
+				"longest contiguous run of them, stopping at the first event you did not name. Nothing you " +
+				"failed on is consumed, and IDs above that gap are reported in held_back (with blocked_by " +
+				"naming the event holding them) and redelivered later — so processing must tolerate seeing " +
+				"an event twice. `through` is a watermark: it consumes that event AND every event before it, " +
+				"read or not, so if one item in a batch failed it silently consumes the failure. Acking past " +
+				"an event you never read is refused unless allow_skip is set.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"topic":      map[string]any{"type": "string", "description": "Event topic name"},
-					"cursor":     map[string]any{"type": "string", "description": "Consumer cursor name"},
-					"through":    map[string]any{"type": "string", "description": "Event ID to acknowledge through; everything at or below it is consumed"},
+					"topic":  map[string]any{"type": "string", "description": "Event topic name"},
+					"cursor": map[string]any{"type": "string", "description": "Consumer cursor name"},
+					"ids": map[string]any{
+						"type": "array", "items": map[string]any{"type": "string"},
+						"description": "Event IDs you processed. The cursor advances over the longest contiguous run; the rest are held back and redelivered. Preferred over through.",
+					},
+					"through":    map[string]any{"type": "string", "description": "Event ID to acknowledge through; everything at or below it is consumed, processed or not"},
 					"allow_skip": map[string]any{"type": "boolean", "description": "Consume events this cursor never read instead of erroring (default false)"},
 				},
-				"required": []string{"topic", "cursor", "through"},
+				"required": []string{"topic", "cursor"},
 			},
 		},
 		{
@@ -487,18 +495,22 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 
 	case "loco_events_ack":
 		var args struct {
-			Topic     string `json:"topic"`
-			Cursor    string `json:"cursor"`
-			Through   string `json:"through"`
-			AllowSkip bool   `json:"allow_skip"`
+			Topic     string   `json:"topic"`
+			Cursor    string   `json:"cursor"`
+			Through   string   `json:"through"`
+			IDs       []string `json:"ids"`
+			AllowSkip bool     `json:"allow_skip"`
 		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
-		if args.Topic == "" || args.Cursor == "" || args.Through == "" {
-			return nil, fmt.Errorf("topic, cursor, and through are required")
+		if args.Topic == "" || args.Cursor == "" {
+			return nil, fmt.Errorf("topic and cursor are required")
 		}
-		return daemon.EventsAck(ctx, s.socket, callTimeout, args.Topic, args.Cursor, args.Through, args.AllowSkip)
+		if (args.Through == "") == (len(args.IDs) == 0) {
+			return nil, fmt.Errorf("pass exactly one of through (watermark) or ids (the ids you processed)")
+		}
+		return daemon.EventsAck(ctx, s.socket, callTimeout, args.Topic, args.Cursor, args.Through, args.IDs, args.AllowSkip)
 
 	case "loco_cron_list":
 		document, err := daemon.RegistryList(ctx, s.socket, callTimeout)

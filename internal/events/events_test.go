@@ -354,6 +354,244 @@ func TestStrictAckRefusesToConsumeUnreadEvents(t *testing.T) {
 	}
 }
 
+// #16, the headline bug: `--through` is a watermark, so a consumer that drains a batch,
+// fails on one item, and acks the batch's last id silently consumes the failure — the
+// natural thing to write. #7's strict cannot object: the consumer read all five, so
+// nothing is unread. Strict answers "did you read it?"; this is "did you process it?".
+// `--ids` lets the consumer say what it processed; the watermark advances over the
+// longest contiguous run and stops at the first thing that failed.
+func TestAckIDsStopsAtTheFirstUnprocessedEvent(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3", "e4", "e5"} {
+		if _, err := store.Emit(EmitInput{Topic: "batch", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("batch", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	// e3's processing failed. The consumer reports what actually succeeded.
+	result, err := store.AckIDs("batch", "consumer", []string{"e1", "e2", "e4", "e5"}, false)
+	if err != nil {
+		t.Fatalf("ack --ids failed: %v", err)
+	}
+	if result.ThroughSeq != 2 {
+		t.Errorf("watermark at seq %d, want 2 (the contiguous run stops before e3)", result.ThroughSeq)
+	}
+	if result.AckedCount != 2 {
+		t.Errorf("AckedCount = %d, want 2", result.AckedCount)
+	}
+	// The whole point: e3 must come back. This is the event #16 silently loses today.
+	redelivered, err := store.Read("batch", "consumer", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(redelivered.Events) == 0 || redelivered.Events[0].ID != "e3" {
+		t.Fatalf("e3 was consumed without being processed (#16); redelivered = %+v", redelivered.Events)
+	}
+}
+
+// Acking above a gap is not silently ignored: the consumer reported work that an earlier
+// failure is blocking, and the only thing that makes that discoverable is saying so.
+func TestAckIDsReportsWhatItHeldBackAndWhyOnly(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3", "e4", "e5"} {
+		if _, err := store.Emit(EmitInput{Topic: "held", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("held", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AckIDs("held", "consumer", []string{"e1", "e2", "e4", "e5"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HeldBack != 2 {
+		t.Errorf("HeldBack = %d, want 2 (e4 and e5 sat above the gap)", result.HeldBack)
+	}
+	if result.BlockedBy != "e3" {
+		t.Errorf("BlockedBy = %q, want %q — naming the blocker is the difference between "+
+			"a count and knowing what to fix", result.BlockedBy, "e3")
+	}
+}
+
+// A fully contiguous --ids is the ordinary case and must behave exactly like --through:
+// nothing held, nothing to explain.
+func TestAckIDsContiguousRunHoldsNothing(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "plain", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("plain", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AckIDs("plain", "consumer", []string{"e1", "e2", "e3"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ThroughSeq != 3 || result.AckedCount != 3 {
+		t.Errorf("result = %+v, want watermark seq 3 consuming 3", result)
+	}
+	if result.HeldBack != 0 || result.BlockedBy != "" {
+		t.Errorf("a contiguous ack reported held-back state: HeldBack=%d BlockedBy=%q",
+			result.HeldBack, result.BlockedBy)
+	}
+}
+
+// Nothing contiguous: the watermark cannot move at all. This must not error — the
+// consumer did report real work — but it must consume nothing and name the blocker.
+func TestAckIDsWithNothingContiguousConsumesNothing(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "blocked", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("blocked", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.AckIDs("blocked", "consumer", []string{"e2", "e3"}, false)
+	if err != nil {
+		t.Fatalf("acking above a gap is not an error: %v", err)
+	}
+	if result.Changed || result.AckedCount != 0 {
+		t.Errorf("result = %+v, want nothing consumed (e1 blocks everything)", result)
+	}
+	if result.HeldBack != 2 || result.BlockedBy != "e1" {
+		t.Errorf("HeldBack=%d BlockedBy=%q, want 2 and e1", result.HeldBack, result.BlockedBy)
+	}
+	remaining, err := store.Read("blocked", "consumer", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining.Events) != 3 {
+		t.Fatalf("%d events remain, want 3 (a blocked ack consumes nothing)", len(remaining.Events))
+	}
+}
+
+// #7's strict still applies: --ids naming an event this cursor was never handed is the
+// same failure --through has, and gets the same refusal.
+func TestAckIDsStillRefusesUnreadEvents(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "strictids", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only e1 was ever handed over.
+	if _, err := store.Read("strictids", "consumer", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AckIDs("strictids", "consumer", []string{"e1", "e2"}, false); !errors.Is(err, ErrAckSkipsUnread) {
+		t.Fatalf("strict did not fire on --ids naming an unread event: %v", err)
+	}
+	if _, err := store.AckIDs("strictids", "consumer", []string{"e1", "e2"}, true); err != nil {
+		t.Fatalf("allow-skip did not override strict for --ids: %v", err)
+	}
+}
+
+// An unknown id is a caller error and must name the id, exactly as --through does.
+func TestAckIDsRejectsUnknownID(t *testing.T) {
+	store := testStore(t)
+	if _, err := store.Emit(EmitInput{Topic: "unknown", ID: "e1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("unknown", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.AckIDs("unknown", "consumer", []string{"e1", "nope"}, false)
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("error = %v, want one naming the unknown id", err)
+	}
+}
+
+// An empty list is a caller error, not a silent no-op.
+func TestAckIDsRejectsEmptyList(t *testing.T) {
+	store := testStore(t)
+	if _, err := store.Emit(EmitInput{Topic: "empty", ID: "e1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("empty", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AckIDs("empty", "consumer", nil, false); err == nil {
+		t.Fatal("an empty --ids was accepted silently")
+	}
+}
+
+// Compaction rewrites the log and resets the floor. A cursor that survives it must still
+// advance over its run: the events are the same events, but the seq space beneath them
+// has been rewritten out from under the cursor.
+//
+// Note this does NOT prove the walk survives a hole in the middle of the seq space —
+// verified unreachable: compaction only ever removes a PREFIX (events.go:504-508), and a
+// duplicate emit returns before a seq is assigned (events.go:190-200), so live seqs are
+// gapless. A test asserting otherwise passes against a deliberately-broken arithmetic
+// walk, which is worse than no test.
+func TestAckIDsAdvancesAfterCompactionResetsTheFloor(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	for _, id := range []string{"e1", "e2", "e3", "e4"} {
+		if _, err := store.Emit(EmitInput{Topic: "sparse", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One cursor acks e1/e2 and ages past the floor, so compaction drops seqs 1-2 and
+	// leaves the survivors starting at 3.
+	if _, err := store.Read("sparse", "leader", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Ack("sparse", "leader", "e2", false); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(15 * 24 * time.Hour)
+	compacted, err := store.Compact("sparse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compacted.Removed == 0 {
+		t.Fatalf("nothing was compacted; the test cannot prove sparseness: %+v", compacted)
+	}
+
+	// A fresh cursor starts at the floor and is handed the survivors.
+	read, err := store.Read("sparse", "late", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Events) == 0 {
+		t.Fatal("no surviving events to ack")
+	}
+	ids := make([]string, 0, len(read.Events))
+	for _, event := range read.Events {
+		ids = append(ids, event.ID)
+	}
+	// Every surviving event is processed, so the watermark must reach the last of them
+	// even though the seq space below them has a hole.
+	result, err := store.AckIDs("sparse", "late", ids, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := read.Events[len(read.Events)-1].Seq
+	if result.ThroughSeq != want {
+		t.Errorf("watermark at seq %d, want %d — the run did not advance over the "+
+			"survivors of a compaction", result.ThroughSeq, want)
+	}
+	if result.HeldBack != 0 {
+		t.Errorf("HeldBack = %d, want 0: every surviving event was acked", result.HeldBack)
+	}
+	remaining, err := store.Read("sparse", "late", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining.Events) != 0 {
+		t.Errorf("%d events remain after acking every survivor", len(remaining.Events))
+	}
+}
+
 // allow-skip is the escape hatch: skipping stays possible, it just stops being the
 // silent default.
 func TestAllowSkipConsumesUnreadEventsAndReportsIt(t *testing.T) {

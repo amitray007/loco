@@ -348,6 +348,9 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			Topic   string `json:"topic"`
 			Cursor  string `json:"cursor"`
 			Through string `json:"through"`
+			// Absent decodes to nil, i.e. the watermark ack a caller predating this field
+			// is asking for. Present means "these are the ids I processed".
+			IDs []string `json:"ids"`
 			// Absent decodes to false, i.e. strict. A caller that predates this field
 			// gets the safe behaviour rather than the silent one.
 			AllowSkip bool `json:"allow_skip"`
@@ -356,7 +359,13 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode ack request: " + err.Error()})
 			return
 		}
-		result, err := eventStore.Ack(request.Topic, request.Cursor, request.Through, request.AllowSkip)
+		var result events.AckResult
+		var err error
+		if len(request.IDs) > 0 {
+			result, err = eventStore.AckIDs(request.Topic, request.Cursor, request.IDs, request.AllowSkip)
+		} else {
+			result, err = eventStore.Ack(request.Topic, request.Cursor, request.Through, request.AllowSkip)
+		}
 		if err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return
