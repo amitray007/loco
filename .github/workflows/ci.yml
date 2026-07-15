@@ -115,20 +115,66 @@ jobs:
           version: "~> v2"
           args: check
 
-      - name: Build a snapshot release
+      # Build against a REAL tag in exactly the format release-please creates,
+      # rather than --snapshot. A snapshot bypasses goreleaser's tag parsing and
+      # derives its version from version_template, so it is structurally unable
+      # to catch a tag/filename mismatch — which is the one failure that burns a
+      # version number, because it only surfaces AFTER the tag and release exist.
+      #
+      # Concretely: with include-component-in-tag left at its default (true),
+      # release-please tags `loco-v0.1.2`; goreleaser rejects that as non-semver
+      # and emits `loco_loco-v0.1.2_darwin_arm64.tar.gz`, while the publish job
+      # looks for `loco_0.1.2_darwin_arm64.tar.gz` and dies. This step fails on
+      # that config and passes on the current one.
+      - name: Build against a release-please-formatted tag
+        run: |
+          set -euo pipefail
+          # Mirrors release-please's tag rendering for this config:
+          # include-v-in-tag: true, include-component-in-tag: false → vX.Y.Z
+          NEXT="99.99.99"
+          TAG="v${NEXT}"
+          git tag -f "$TAG" -m "ci release-check probe"
+          echo "probing with tag: $TAG"
+          echo "PROBE_VERSION=${NEXT}" >> "$GITHUB_ENV"
+
+      - name: Build release artifacts
         uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --snapshot --clean --skip=publish
+          args: release --clean --skip=publish --skip=validate
 
-      # Render the formula against the snapshot's real checksums and assert the
-      # result is valid Ruby with no leftover placeholders — the same rendering
-      # the release performs, minus the push.
+      # Assert the artifacts are named exactly what the publish job hardcodes.
+      # This is the assertion that catches a tag-format regression.
+      - name: Assert artifact names match what publish expects
+        run: |
+          set -euo pipefail
+          VERSION="${PROBE_VERSION}"
+          missing=0
+          for f in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+            path="dist/loco_${VERSION}_${f}.tar.gz"
+            if [ ! -f "$path" ]; then
+              echo "MISSING: $path" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "" >&2
+            echo "Artifact names do not match what the publish job expects." >&2
+            echo "The release tag format and goreleaser's .Version have diverged." >&2
+            echo "Actually produced:" >&2
+            ls -1 dist/*.tar.gz >&2 || true
+            exit 1
+          fi
+          echo "all four artifacts named as publish expects"
+
+      # Render the formula against the real checksums and assert the result is
+      # valid Ruby with no leftover placeholders — the same rendering the
+      # release performs, minus the push.
       - name: Render and validate the Homebrew formula
         run: |
           set -euo pipefail
-          VERSION=$(jq -r .version dist/metadata.json)
-          echo "snapshot version: $VERSION"
+          VERSION="${PROBE_VERSION}"
+          echo "probe version: $VERSION"
           sha_for() {
             local f="$1" s
             s=$(awk -v want="$f" '$2 == want { print $1 }' dist/checksums.txt)

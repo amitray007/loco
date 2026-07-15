@@ -80,11 +80,27 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Returns an array of PRs associated with the commit; [] for a direct push.
-          LABELS=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
-            --jq '.[0].labels[].name // empty' 2>/dev/null || echo "")
-
           echo "[bump] commit=${SHA}"
+
+          # Collect labels from EVERY PR associated with this commit, not just
+          # .[0] — a commit can map to more than one PR, and a `major` on the
+          # second must not be invisible.
+          #
+          # `.labels // []` before iterating: on a direct push the endpoint
+          # returns [], and `.[0].labels[]` then throws "Cannot iterate over
+          # null" rather than printing nothing.
+          #
+          # The API call is NOT allowed to fail softly. An unchecked failure
+          # here is indistinguishable from "no labels", which would silently
+          # ship a major release as a patch. Fail the job instead.
+          if ! RAW=$(gh api "repos/${REPO}/commits/${SHA}/pulls" \
+                       --jq '.[] | .labels // [] | .[].name'); then
+            echo "[bump] FATAL: could not read PR labels for ${SHA}." >&2
+            echo "[bump] Refusing to guess — a transient API error must not" >&2
+            echo "[bump] silently downgrade a major/minor release to a patch." >&2
+            exit 1
+          fi
+          LABELS="$RAW"
           echo "[bump] PR labels: ${LABELS:-<none>}"
 
           # Highest label wins: major > minor > patch. -x anchors the match so a
@@ -171,15 +187,39 @@ jobs:
         run: |
           set -euo pipefail
           TAP_TAG="loco-v${VERSION}"
-          gh release delete "$TAP_TAG" --repo amitray007/homebrew-tap --yes --cleanup-tag 2>/dev/null || true
+
+          # Verify every artifact exists BEFORE touching the tap. The tap
+          # release is what `brew install` fetches from; deleting it and then
+          # failing to recreate it takes the published formula offline for all
+          # users. Check first, destroy second.
+          for f in darwin_arm64 darwin_amd64 linux_arm64 linux_amd64; do
+            path="dist/loco_${VERSION}_${f}.tar.gz"
+            if [ ! -f "$path" ]; then
+              echo "FATAL: expected artifact missing: ${path}" >&2
+              echo "Refusing to touch the tap release. Artifacts present:" >&2
+              ls -1 dist/*.tar.gz >&2 || true
+              exit 1
+            fi
+          done
+          echo "all four artifacts present"
+
+          # Only reachable once the artifacts are known good. Releases are
+          # immutable once assets attach, so a re-run must delete and recreate
+          # rather than upload over. --cleanup-tag is omitted deliberately: the
+          # rendered formula references this tag, and removing it would break
+          # installs of the currently-published version if the recreate fails.
+          if gh release view "$TAP_TAG" --repo amitray007/homebrew-tap >/dev/null 2>&1; then
+            echo "tap release ${TAP_TAG} exists (re-run); replacing it"
+            gh release delete "$TAP_TAG" --repo amitray007/homebrew-tap --yes
+          fi
           gh release create "$TAP_TAG" \
             --repo amitray007/homebrew-tap \
             --title "loco v${VERSION}" \
             --notes "Binaries for loco v${VERSION}. Install: \`brew install amitray007/tap/loco\`" \
-            dist/loco_${VERSION}_darwin_arm64.tar.gz \
-            dist/loco_${VERSION}_darwin_amd64.tar.gz \
-            dist/loco_${VERSION}_linux_arm64.tar.gz \
-            dist/loco_${VERSION}_linux_amd64.tar.gz
+            "dist/loco_${VERSION}_darwin_arm64.tar.gz" \
+            "dist/loco_${VERSION}_darwin_amd64.tar.gz" \
+            "dist/loco_${VERSION}_linux_arm64.tar.gz" \
+            "dist/loco_${VERSION}_linux_amd64.tar.gz"
 
       - name: Render and push the Homebrew formula
         env:
@@ -206,8 +246,13 @@ jobs:
           L_ARM=$(sha_for "loco_${VERSION}_linux_arm64.tar.gz")
           L_AMD=$(sha_for "loco_${VERSION}_linux_amd64.tar.gz")
 
-          git clone --depth 1 \
-            "https://x-access-token:${GH_TOKEN}@github.com/amitray007/homebrew-tap.git" tap
+          # Clone WITHOUT embedding the PAT in the remote URL: git would write
+          # it in cleartext into tap/.git/config, where every later step in the
+          # job can read it — the exact thing persist-credentials:false above
+          # exists to prevent. Pass it per-invocation as an auth header instead.
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.extraheader=${AUTH_HEADER}" clone --depth 1 \
+            "https://github.com/amitray007/homebrew-tap.git" tap
           mkdir -p tap/Formula
           sed -e "s|{{VERSION}}|${VERSION}|g" \
               -e "s|{{TAG}}|${TAP_TAG}|g" \
@@ -233,4 +278,4 @@ jobs:
             exit 0
           fi
           git commit -m "loco ${VERSION}"
-          git push origin HEAD:main
+          git -c "http.extraheader=${AUTH_HEADER}" push origin HEAD:main

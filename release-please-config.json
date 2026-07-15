@@ -9,6 +9,7 @@
   },
   "versioning": "always-bump-patch",
   "include-v-in-tag": true,
+  "include-component-in-tag": false,
   "pull-request-title-pattern": "chore(release): loco v${version}",
   "pull-request-header": "Automated release PR. Merging this tags the release and publishes to the Homebrew tap.",
   "changelog-sections": [
