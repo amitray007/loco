@@ -44,10 +44,11 @@ type PutResult struct {
 }
 
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	doc  Document
-	now  func() time.Time
+	mu            sync.RWMutex
+	path          string
+	doc           Document
+	now           func() time.Time
+	specValidator SpecValidator
 }
 
 func Open(path string) (*Store, error) {
@@ -73,6 +74,15 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Reject a spec that cannot be scheduled, at the boundary every write crosses.
+	// Load does not do this: an unschedulable job already on disk is surfaced as
+	// invalid rather than blocking the daemon's start.
+	if s.specValidator != nil {
+		if err := s.specValidator(input.Kind, input.Spec); err != nil {
+			return PutResult{}, fmt.Errorf("invalid %s spec for job %q: %w", input.Kind, input.Name, err)
+		}
+	}
 
 	if current, ok := s.doc.Jobs[input.Name]; ok && current.Kind == input.Kind && jsonEqual(current.Spec, input.Spec) {
 		return PutResult{
@@ -147,6 +157,14 @@ func (s *Store) Snapshot() Document {
 // path (runs/logs) use this to reject traversal (e.g. "../x") before joining.
 func ValidName(name string) bool { return namePattern.MatchString(name) }
 
+// Validate checks a job's shape: name, kind, and that the spec is a JSON object. It
+// deliberately does NOT interpret the spec's contents — see SpecValidator.
+//
+// This runs on both the write path (Put) and the load path, and those need different
+// answers about a spec that cannot be scheduled. A caller writing one should be told
+// no; a daemon starting up with one already on disk must not refuse to start and take
+// every healthy job down with it. Contents are therefore checked via the store's
+// SpecValidator, which Put consults and load does not.
 func Validate(input PutInput) error {
 	if !namePattern.MatchString(input.Name) {
 		return fmt.Errorf("invalid job name %q: use 1-128 letters, digits, dots, underscores, or hyphens", input.Name)
@@ -165,6 +183,25 @@ func Validate(input PutInput) error {
 		return errors.New("job spec must be a JSON object")
 	}
 	return nil
+}
+
+// SpecValidator reports whether a job spec of the given kind is usable — for a cron
+// job, that its schedule parses. Registry cannot check this itself: interpreting a
+// spec means importing cronjob, and cronjob already imports registry.
+//
+// It lives here rather than at the CLI because the CLI is not the only write path.
+// `loco registry put` is a documented, first-class command, and it registered specs
+// that `loco cron add` rejects — leaving a job that shows up in `cron list` and never
+// fires. Validation belongs at the boundary every write crosses, which is Put.
+type SpecValidator func(kind string, spec []byte) error
+
+// SetSpecValidator installs the per-kind spec check used by Put. Wired by the daemon,
+// which imports both this package and cronjob. Nil disables the check, which is what
+// tests and any caller that only needs shape validation get.
+func (s *Store) SetSpecValidator(validator SpecValidator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specValidator = validator
 }
 
 func load(path string) (Document, error) {

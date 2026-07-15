@@ -60,6 +60,17 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if err != nil {
 		return fmt.Errorf("open registry: %w", err)
 	}
+	// Reject unschedulable specs at every write path, not just `cron add`. The daemon
+	// is where this can be wired: registry cannot import cronjob (cronjob imports
+	// registry), so the check is injected rather than called directly.
+	registryStore.SetSpecValidator(func(kind string, spec []byte) error {
+		if kind != "cron" {
+			return nil
+		}
+		_, err := cronjob.DecodeSpec(spec)
+		return err
+	})
+
 	notifier := notification.New(p.NotifyState, p.Alerts, notification.DesktopSender())
 	automaticChannel := os.Getenv("LOCO_NOTIFY_CHANNEL")
 	if automaticChannel == "" {

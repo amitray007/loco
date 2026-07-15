@@ -79,7 +79,9 @@ func TestRegistrySurvivesDaemonRestart(t *testing.T) {
 	put, err := RegistryPut(context.Background(), p.Socket, time.Second, registry.PutInput{
 		Name: "restart.demo",
 		Kind: "cron",
-		Spec: json.RawMessage(`{"schedule":"*/5 * * * *"}`),
+		// A complete spec: the daemon now rejects one it could never schedule, and this
+		// test is about the registry surviving a restart, not about spec validation.
+		Spec: json.RawMessage(`{"schedule":"*/5 * * * *","command":["/bin/sh","-c","true"]}`),
 	})
 	if err != nil {
 		t.Fatal(err)
