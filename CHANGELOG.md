@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once a first tagged release exists.
 
+## [0.1.3](https://github.com/amitray007/loco/compare/v0.1.2...v0.1.3) (2026-07-15)
+
+
+### Features
+
+* **events:** ack --ids, so a consumer can say what it actually processed ([#16](https://github.com/amitray007/loco/issues/16)) ([#22](https://github.com/amitray007/loco/issues/22)) ([a28c0d1](https://github.com/amitray007/loco/commit/a28c0d1590c006112dafc7c6998440287cea6c52))
+
+
+### Bug Fixes
+
+* **cli:** guard flags in usage strings; surface unenforced strict ack ([#19](https://github.com/amitray007/loco/issues/19)) ([#20](https://github.com/amitray007/loco/issues/20)) ([8c51c84](https://github.com/amitray007/loco/commit/8c51c845fd094c098a3bb73c9a531b5586a7c72e))
+
 ## [0.1.2](https://github.com/amitray007/loco/compare/v0.1.1...v0.1.2) (2026-07-15)
 
 
