@@ -689,8 +689,8 @@ func pausedVerb(paused bool) string {
 // With wait=true it long-polls: returns as soon as any unread event exists, else polls
 // with backoff until the timeout, then returns whatever it has (possibly empty). Read is
 // non-mutating (the cursor only advances on ack), so repeated polling is safe.
-func readEvents(socket, topic, cursor string, limit int, wait bool, timeout time.Duration) (events.ReadResult, error) {
-	result, err := daemon.EventsRead(context.Background(), socket, 5*time.Second, topic, cursor, limit)
+func readEvents(socket, topic, cursor, holder string, limit int, wait bool, timeout time.Duration) (events.ReadResult, error) {
+	result, err := daemon.EventsRead(context.Background(), socket, 5*time.Second, topic, cursor, holder, limit)
 	if err != nil || !wait || len(result.Events) > 0 {
 		return result, err
 	}
@@ -704,7 +704,7 @@ func readEvents(socket, topic, cursor string, limit int, wait bool, timeout time
 		if backoff > 0 {
 			time.Sleep(backoff)
 		}
-		result, err = daemon.EventsRead(context.Background(), socket, 5*time.Second, topic, cursor, limit)
+		result, err = daemon.EventsRead(context.Background(), socket, 5*time.Second, topic, cursor, holder, limit)
 		if err != nil || len(result.Events) > 0 {
 			return result, err
 		}
@@ -929,13 +929,14 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "read":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--json]")
 			return 1
 		}
 		topic := args[1]
 		flags := flag.NewFlagSet("events read", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		cursor := flags.String("cursor", "", "consumer cursor")
+		holder := flags.String("holder", "", "identify this consumer, so loco can warn if another one shares the cursor")
 		limit := flags.Int("limit", 100, "maximum events")
 		wait := flags.Bool("wait", false, "block until at least one unread event arrives (or --timeout)")
 		waitTimeout := flags.Duration("timeout", 30*time.Second, "max time to block when --wait is set")
@@ -944,7 +945,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 || *cursor == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--wait [--timeout D]] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--wait [--timeout D]] [--json]")
 			return 1
 		}
 		if *wait && *limit == 0 {
@@ -953,7 +954,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			_, _ = fmt.Fprintln(stderr, "--wait requires a positive --limit")
 			return 1
 		}
-		result, err := readEvents(p.Socket, topic, *cursor, *limit, *wait, *waitTimeout)
+		result, err := readEvents(p.Socket, topic, *cursor, *holder, *limit, *wait, *waitTimeout)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "read events: %v\n", err)
 			return 2
@@ -1009,25 +1010,35 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		flags.SetOutput(stderr)
 		cursor := flags.String("cursor", "", "consumer cursor")
 		through := flags.String("through", "", "event ID")
+		allowSkip := flags.Bool("allow-skip", false, "consume events this cursor never read instead of erroring")
 		jsonFlag := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 || *cursor == "" || *through == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
 			return 1
 		}
-		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through)
+		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through, *allowSkip)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "ack events: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
-		} else if result.Changed {
-			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+			return 0
+		}
+		// Report the blast radius even when nothing was skipped: `ack --through ID`
+		// reads like one message but consumes everything below it, and the count is
+		// the only thing at the call site that shows it.
+		if result.Changed {
+			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d), consuming %d event(s)\n",
+				result.Cursor, result.ThroughID, result.ThroughSeq, result.AckedCount)
 		} else {
 			_, _ = fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+		}
+		if result.SkippedUnread > 0 {
+			_, _ = fmt.Fprintf(stderr, "warning: %d of those event(s) were never returned by a read on this cursor\n", result.SkippedUnread)
 		}
 		return 0
 	case "list":

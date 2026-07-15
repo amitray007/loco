@@ -77,18 +77,54 @@ timestamp. That's what makes the producer idempotent.
 ## 4. Consume events
 
 ```sh
-loco events read your.topic --cursor your-cursor --json   # non-mutating
+loco events read your.topic --cursor your-cursor --holder your-consumer --json
 # … do the work …
 loco events ack your.topic --cursor your-cursor --through <event-id>
 ```
 
 - **Ack only after the work is durably done.** Failure → don't ack → next run retries.
-- **One consumer per cursor.** Two consumers sharing a cursor double-process. If you
-  ever need an unattended drain alongside a live one, they need a lock first.
+- **`ack --through` is a watermark, not a receipt.** It consumes that event *and every
+  event below it*. If you drain a batch and one item fails, ack the highest
+  **contiguously succeeded** id — not the batch's last id, which would silently consume
+  the failure. loco refuses an ack that reaches past events your cursor never read
+  (`--allow-skip` overrides), and every ack reports how many events it consumed, but it
+  cannot tell "read" from "processed": only you know which items succeeded.
 - **Inspect with `peek`, not `read`.** `loco events peek your.topic --tail 5` creates no
   cursor. A `read` with a throwaway cursor name mints one that pins retention 30 days.
 - **Await instead of polling:** `loco events read your.topic --cursor c --wait
   --timeout 30s` blocks until an event lands.
+
+### One consumer per cursor
+
+**This is a contract you keep, not one loco enforces.** Two consumers reading the same
+cursor both receive every event and both act on it:
+
+```sh
+# consumer A                                    # consumer B, same cursor
+loco events read t --cursor shared              loco events read t --cursor shared
+  → evt-1                                         → evt-1        # both get it
+```
+
+That is not a race, and running them sequentially does not help. `read` never advances
+the cursor — that is what makes the bus at-least-once and crash-safe — so until someone
+acks, every reader sees the same unread set. Two drains means the work happens twice. For
+a side-effecting consumer that can be unrecoverable: two agents reviewing the same PR,
+two identical posts, a duplicate approval that is already public.
+
+Pass `--holder <name>` on every read and `loco status` will warn when two distinct
+holders share a cursor inside an hour:
+
+```
+cursors:
+  dev-loop  unread=3  warning=read by 2 holders within 1h0m0s (cron-drain, sweep-a)
+                              — one consumer per cursor, or both process every event
+```
+
+The warning is a backstop, not a guarantee. loco cannot identify callers on its own — the
+read RPC carries no identity, and unix-socket peer credentials give a pid on Linux but
+only a uid on macOS, where every consumer runs as the same user. A holder is a hint from
+a cooperating caller: a consumer that passes none is invisible, so **no warning is not
+proof of a single consumer**. If you need a second drain, give it its own cursor.
 
 ## 5. Push into a live session (optional)
 

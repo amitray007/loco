@@ -14,12 +14,13 @@ func EventsEmit(ctx context.Context, socket string, timeout time.Duration, input
 	err := eventRequest(ctx, socket, timeout, "events.emit", input, &result)
 	return result, err
 }
-func EventsRead(ctx context.Context, socket string, timeout time.Duration, topic, cursor string, limit int) (events.ReadResult, error) {
+func EventsRead(ctx context.Context, socket string, timeout time.Duration, topic, cursor, holder string, limit int) (events.ReadResult, error) {
 	request := struct {
 		Topic  string `json:"topic"`
 		Cursor string `json:"cursor"`
 		Limit  int    `json:"limit"`
-	}{topic, cursor, limit}
+		Holder string `json:"holder"`
+	}{topic, cursor, limit, holder}
 	var result events.ReadResult
 	err := eventRequest(ctx, socket, timeout, "events.read", request, &result)
 	return result, err
@@ -34,12 +35,13 @@ func EventsPeek(ctx context.Context, socket string, timeout time.Duration, topic
 	err := eventRequest(ctx, socket, timeout, "events.peek", request, &result)
 	return result, err
 }
-func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string) (events.AckResult, error) {
+func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string, allowSkip bool) (events.AckResult, error) {
 	request := struct {
-		Topic   string `json:"topic"`
-		Cursor  string `json:"cursor"`
-		Through string `json:"through"`
-	}{topic, cursor, through}
+		Topic     string `json:"topic"`
+		Cursor    string `json:"cursor"`
+		Through   string `json:"through"`
+		AllowSkip bool   `json:"allow_skip"`
+	}{topic, cursor, through, allowSkip}
 	var result events.AckResult
 	err := eventRequest(ctx, socket, timeout, "events.ack", request, &result)
 	return result, err
