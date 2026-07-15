@@ -65,8 +65,16 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 	if automaticChannel == "" {
 		automaticChannel = "desktop"
 	}
+	// A dropped alert used to be invisible: the error was discarded here, and Send
+	// returned before recording the alert, so a failure left no trace in either place
+	// and read exactly like a job that had succeeded. Send now records the alert
+	// regardless of delivery; this reports what delivery did. launchd/systemd capture
+	// the daemon's stderr to logs/daemon.stderr.log, so this is where a dropped alert
+	// becomes findable.
 	failureHandler := func(name string, record cronjob.RunRecord) {
-		_, _ = notifier.Send(context.Background(), notification.Input{Title: "loco job failed", Body: fmt.Sprintf("%s exited with code %d", name, record.ExitCode), Channel: automaticChannel, Group: "job-failure:" + name})
+		if _, err := notifier.Send(context.Background(), notification.Input{Title: "loco job failed", Body: fmt.Sprintf("%s exited with code %d", name, record.ExitCode), Channel: automaticChannel, Group: "job-failure:" + name}); err != nil {
+			fmt.Fprintf(os.Stderr, "loco: notify %q failed: %v (alert recorded to %s)\n", name, err, p.Alerts)
+		}
 	}
 	cronManager := cronjob.New(registryStore, p)
 	cronManager.SetFailureHandler(failureHandler)

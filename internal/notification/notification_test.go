@@ -1,7 +1,9 @@
 package notification
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -80,6 +82,74 @@ func TestFailedDeliveryDoesNotConsumeGroup(t *testing.T) {
 	sender.err = nil
 	if result, err := manager.Send(context.Background(), Input{Title: "x", Body: "y", Group: "g"}); err != nil || !result.Delivered {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+// A desktop delivery failure must still leave a durable record. Send used to write
+// alerts.jsonl only after the sender succeeded and to return early on failure, so a
+// desktop channel that was unavailable (osascript on a headless/SSH session, say) lost
+// the alert entirely: the caller got an error it discarded, and `loco status` — which
+// reads this file — had nothing to show. Both traces of the failure vanished.
+//
+// The alert is the durable record; it must not depend on a channel that may not exist.
+func TestFailedDeliveryStillRecordsTheAlert(t *testing.T) {
+	root := t.TempDir()
+	alerts := filepath.Join(root, "alerts")
+	sender := &fakeSender{err: errors.New("osascript: no display available")}
+	manager := New(filepath.Join(root, "state"), alerts, sender)
+
+	_, err := manager.Send(context.Background(), Input{Title: "loco job failed", Body: "worker exited 1", Group: "job-failure:worker"})
+	if err == nil {
+		t.Fatal("Send reported success despite a failing sender")
+	}
+
+	data, readErr := os.ReadFile(alerts)
+	if readErr != nil {
+		t.Fatalf("delivery failed and no alert was recorded: %v", readErr)
+	}
+	var alert Alert
+	if err := json.Unmarshal(bytes.TrimSpace(data), &alert); err != nil {
+		t.Fatalf("decode alert %q: %v", data, err)
+	}
+	if alert.Title != "loco job failed" || alert.Message != "worker exited 1" {
+		t.Fatalf("alert = %+v", alert)
+	}
+	// The record must say it did not reach the channel, or a reader would take an
+	// undelivered alert for a delivered one.
+	if alert.Delivered {
+		t.Errorf("alert.Delivered = true after a failed send: %+v", alert)
+	}
+	if alert.DeliveryError == "" {
+		t.Errorf("alert.DeliveryError is empty; the reason is the whole point: %+v", alert)
+	}
+}
+
+// Recording a failed alert must not consume the group window — otherwise the durability
+// fix above would silently suppress the retry that TestFailedDeliveryDoesNotConsumeGroup
+// exists to protect.
+func TestRecordingAFailedAlertDoesNotSuppressTheRetry(t *testing.T) {
+	root := t.TempDir()
+	alerts := filepath.Join(root, "alerts")
+	sender := &fakeSender{err: errors.New("nope")}
+	manager := New(filepath.Join(root, "state"), alerts, sender)
+
+	if _, err := manager.Send(context.Background(), Input{Title: "x", Body: "y", Group: "g"}); err == nil {
+		t.Fatal("send succeeded")
+	}
+	sender.err = nil
+	result, err := manager.Send(context.Background(), Input{Title: "x", Body: "y", Group: "g"})
+	if err != nil || !result.Delivered {
+		t.Fatalf("retry after a recorded failure was suppressed: result=%+v err=%v", result, err)
+	}
+
+	// Both attempts must appear: the failure and the delivery.
+	data, err := os.ReadFile(alerts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d alert lines, want 2 (one failed, one delivered):\n%s", len(lines), data)
 	}
 }
 
