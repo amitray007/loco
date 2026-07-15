@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once a first tagged release exists.
 
+## [0.1.2](https://github.com/amitray007/loco/compare/v0.1.1...v0.1.2) (2026-07-15)
+
+
+### Features
+
+* **ci:** automated versioning + releases (release-please → GitHub release + Homebrew tap) ([#6](https://github.com/amitray007/loco/issues/6)) ([fec7f11](https://github.com/amitray007/loco/commit/fec7f11f4313da4e5a8c4bc378f42f70e6aecc6c))
+* **events:** strict ack + shared-cursor warning ([#17](https://github.com/amitray007/loco/issues/17)) ([90cf294](https://github.com/amitray007/loco/commit/90cf294aad56ad555fe9f017b0c79144c60fab0b))
+
+
+### Bug Fixes
+
+* **cli:** unbreak subcommand discovery; expose loco_events_peek over MCP ([#13](https://github.com/amitray007/loco/issues/13)) ([fb71a30](https://github.com/amitray007/loco/commit/fb71a30175f6a0f2f7f137a0e0e12bb98a6dd503))
+* **cron:** close the silent-failure class — overruns, bad specs, passthrough, dropped alerts ([#15](https://github.com/amitray007/loco/issues/15)) ([667e8e8](https://github.com/amitray007/loco/commit/667e8e8ffc04149150f2b45e75c16b2a56b93a0f))
+
 ## [Unreleased]
 
 ### Added
