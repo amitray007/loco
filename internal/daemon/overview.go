@@ -111,7 +111,7 @@ func StatusOverview(ctx context.Context, socket string, timeout time.Duration) (
 	if err != nil {
 		return Overview{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err = conn.Write([]byte("status.overview\n")); err != nil {
 		return Overview{}, err
 	}

@@ -21,7 +21,7 @@ func CronRunNow(ctx context.Context, socket string, timeout time.Duration, name 
 	if err != nil {
 		return cronjob.TriggerResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("cron.run-now\n")); err != nil {
 		return cronjob.TriggerResult{}, err
 	}
@@ -49,7 +49,7 @@ func RegistryPut(ctx context.Context, socket string, timeout time.Duration, inpu
 	if err != nil {
 		return registry.PutResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("registry.put\n")); err != nil {
 		return registry.PutResult{}, fmt.Errorf("request registry put: %w", err)
 	}
@@ -75,7 +75,7 @@ func RegistryDelete(ctx context.Context, socket string, timeout time.Duration, n
 	if err != nil {
 		return registry.DeleteResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("registry.delete\n")); err != nil {
 		return registry.DeleteResult{}, fmt.Errorf("request registry delete: %w", err)
 	}
@@ -103,7 +103,7 @@ func RegistryList(ctx context.Context, socket string, timeout time.Duration) (re
 	if err != nil {
 		return registry.Document{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("registry.list\n")); err != nil {
 		return registry.Document{}, fmt.Errorf("request registry list: %w", err)
 	}

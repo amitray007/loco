@@ -49,7 +49,7 @@ func eventRequest(ctx context.Context, socket string, timeout time.Duration, ope
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err = conn.Write([]byte(operation + "\n")); err != nil {
 		return fmt.Errorf("request %s: %w", operation, err)
 	}

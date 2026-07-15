@@ -163,7 +163,7 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 const maxRequestBytes = 2 << 20
 
 func serveConnection(conn net.Conn, state runtimeState, started time.Time, p paths.Paths, registryStore *registry.Store, cronManager *cronjob.Manager, serviceManager *service.Manager, eventStore *events.Store, notifier *notification.Manager) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	// Bound the whole connection: the command word plus its JSON body may not exceed
 	// the request cap.
@@ -376,7 +376,7 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(mode); err != nil {
 		_ = tmp.Close()
 		return err

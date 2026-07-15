@@ -16,9 +16,15 @@ func testPaths(t *testing.T) paths.Paths {
 	t.Helper()
 	root := t.TempDir()
 	unitDir := filepath.Join(root, "units")
+	// Install calls EnsureRuntimeDirs, which MkdirAll's every runtime dir — so all of
+	// them must be set. Leaving RunDir/RunsDir/EventsDir empty makes it mkdir "" and
+	// fail with a bare "no such file or directory".
 	return paths.Paths{
 		ConfigDir:    root,
+		RunDir:       filepath.Join(root, "run"),
 		LogDir:       filepath.Join(root, "logs"),
+		RunsDir:      filepath.Join(root, "runs"),
+		EventsDir:    filepath.Join(root, "events"),
 		ServiceUnit:  filepath.Join(unitDir, paths.Label+".service"),
 		WatchdogUnit: filepath.Join(unitDir, paths.WatchdogLabel+".service"),
 	}

@@ -135,29 +135,29 @@ func run(args []string, stdout, stderr io.Writer) int {
 	global.SetOutput(stderr)
 	configDir := global.String("config-dir", "", "override loco's configuration directory")
 	jsonOutput := global.Bool("json", false, "emit JSON")
-	global.Usage = func() { fmt.Fprint(stderr, usage) }
+	global.Usage = func() { _, _ = fmt.Fprint(stderr, usage) }
 	if err := global.Parse(args); err != nil {
 		return 1
 	}
 
 	args = global.Args()
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return 0
 	}
 	if args[0] == "version" || args[0] == "--version" {
-		fmt.Fprintf(stdout, "loco %s\n", effectiveVersion())
+		_, _ = fmt.Fprintf(stdout, "loco %s\n", effectiveVersion())
 		return 0
 	}
 	known := map[string]bool{"daemon": true, "registry": true, "cron": true, "svc": true, "events": true, "status": true, "doctor": true, "notify": true, "mcp": true, "runs": true, "logs": true}
 	if !known[args[0]] {
-		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
+		_, _ = fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 1
 	}
 
 	p, err := paths.Resolve(*configDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "resolve paths: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "resolve paths: %v\n", err)
 		return 2
 	}
 	if args[0] == "daemon" {
@@ -195,47 +195,47 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, "usage: loco daemon install|uninstall|status|run\n")
+		_, _ = fmt.Fprint(stderr, "usage: loco daemon install|uninstall|status|run\n")
 		return 1
 	}
 
 	switch args[0] {
 	case "install":
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: loco daemon install")
+			_, _ = fmt.Fprintln(stderr, "usage: loco daemon install")
 			return 1
 		}
 		executable, err := os.Executable()
 		if err != nil {
-			fmt.Fprintf(stderr, "locate loco executable: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "locate loco executable: %v\n", err)
 			return 2
 		}
 		action, err := platform.Manager().Install(context.Background(), p, executable)
 		if err != nil {
-			fmt.Fprintf(stderr, "install daemon: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "install daemon: %v\n", err)
 			return 2
 		}
 		// The service manager returns before the daemon has created its socket; wait
 		// (bounded) so a caller scripting `install && status` doesn't hit a spurious
 		// "not running".
 		awaitDaemonReady(p.Socket, 5*time.Second)
-		fmt.Fprintf(stdout, "daemon %s (%s)\n", action, p.ServiceUnit)
+		_, _ = fmt.Fprintf(stdout, "daemon %s (%s)\n", action, p.ServiceUnit)
 		return 0
 
 	case "uninstall":
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: loco daemon uninstall")
+			_, _ = fmt.Fprintln(stderr, "usage: loco daemon uninstall")
 			return 1
 		}
 		removed, err := platform.Manager().Uninstall(context.Background(), p)
 		if err != nil {
-			fmt.Fprintf(stderr, "uninstall daemon: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "uninstall daemon: %v\n", err)
 			return 2
 		}
 		if removed {
-			fmt.Fprintln(stdout, "daemon uninstalled")
+			_, _ = fmt.Fprintln(stdout, "daemon uninstalled")
 		} else {
-			fmt.Fprintln(stdout, "daemon is not installed")
+			_, _ = fmt.Fprintln(stdout, "daemon is not installed")
 		}
 		return 0
 
@@ -247,7 +247,7 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if statusFlags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco daemon status [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco daemon status [--json]")
 			return 1
 		}
 		status, err := daemon.Status(context.Background(), p.Socket, 750*time.Millisecond)
@@ -255,27 +255,27 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			if globalJSON || *jsonFlag {
 				_ = json.NewEncoder(stdout).Encode(daemon.UnhealthyStatus(effectiveVersion(), err))
 			} else {
-				fmt.Fprintf(stderr, "loco daemon unavailable: %v\n", err)
+				_, _ = fmt.Fprintf(stderr, "loco daemon unavailable: %v\n", err)
 			}
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(status)
 		} else {
-			fmt.Fprintf(stdout, "loco daemon healthy (pid %d, uptime %s, version %s)\n",
+			_, _ = fmt.Fprintf(stdout, "loco daemon healthy (pid %d, uptime %s, version %s)\n",
 				status.PID, formatUptime(status.UptimeSeconds), status.Version)
 		}
 		return 0
 
 	case "run":
 		if len(args) != 1 {
-			fmt.Fprintln(stderr, "usage: loco daemon run")
+			_, _ = fmt.Fprintln(stderr, "usage: loco daemon run")
 			return 1
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		if err := daemon.Run(ctx, p, effectiveVersion()); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(stderr, "run daemon: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "run daemon: %v\n", err)
 			return 2
 		}
 		return 0
@@ -287,7 +287,7 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco daemon watchdog [--threshold N]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco daemon watchdog [--threshold N]")
 			return 1
 		}
 		checker := func(ctx context.Context) error {
@@ -299,7 +299,7 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		sender := notification.SenderForChannel(os.Getenv("LOCO_NOTIFY_CHANNEL"), p.Alerts)
 		result, err := watchdog.Check(context.Background(), p.WatchdogState, *threshold, checker, sender)
 		if err != nil {
-			fmt.Fprintf(stderr, "watchdog check: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "watchdog check: %v\n", err)
 			return 2
 		}
 		if globalJSON {
@@ -308,21 +308,21 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 
 	default:
-		fmt.Fprintf(stderr, "unknown daemon command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown daemon command %q\n", args[0])
 		return 1
 	}
 }
 
 func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: loco registry put|list")
+		_, _ = fmt.Fprintln(stderr, "usage: loco registry put|list")
 		return 1
 	}
 
 	switch args[0] {
 	case "put":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -335,25 +335,25 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			return 1
 		}
 		if putFlags.NArg() != 0 || *kind == "" {
-			fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco registry put NAME --kind cron|svc [--data JSON] [--json]")
 			return 1
 		}
 		input := registry.PutInput{Name: name, Kind: *kind, Spec: json.RawMessage(*data)}
 		if err := registry.Validate(input); err != nil {
-			fmt.Fprintf(stderr, "invalid registry entry: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "invalid registry entry: %v\n", err)
 			return 1
 		}
 		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, input)
 		if err != nil {
-			fmt.Fprintf(stderr, "put registry entry: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "put registry entry: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
-			fmt.Fprintf(stdout, "registry entry %s stored (revision %d)\n", result.Job.Name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "registry entry %s stored (revision %d)\n", result.Job.Name, result.Revision)
 		} else {
-			fmt.Fprintf(stdout, "registry entry %s unchanged (revision %d)\n", result.Job.Name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "registry entry %s unchanged (revision %d)\n", result.Job.Name, result.Revision)
 		}
 		return 0
 
@@ -365,12 +365,12 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			return 1
 		}
 		if listFlags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco registry list [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco registry list [--json]")
 			return 1
 		}
 		document, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
 		if err != nil {
-			fmt.Fprintf(stderr, "list registry entries: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "list registry entries: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
@@ -378,7 +378,7 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			return 0
 		}
 		if len(document.Jobs) == 0 {
-			fmt.Fprintln(stdout, "No registry entries.")
+			_, _ = fmt.Fprintln(stdout, "No registry entries.")
 			return 0
 		}
 		names := make([]string, 0, len(document.Jobs))
@@ -387,29 +387,29 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 		}
 		sort.Strings(names)
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "NAME\tKIND\tUPDATED")
+		_, _ = fmt.Fprintln(table, "NAME\tKIND\tUPDATED")
 		for _, name := range names {
 			job := document.Jobs[name]
-			fmt.Fprintf(table, "%s\t%s\t%s\n", job.Name, job.Kind, job.UpdatedAt)
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", job.Name, job.Kind, job.UpdatedAt)
 		}
 		_ = table.Flush()
 		return 0
 
 	default:
-		fmt.Fprintf(stderr, "unknown registry command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown registry command %q\n", args[0])
 		return 1
 	}
 }
 
 func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: loco cron add|list|run-now")
+		_, _ = fmt.Fprintln(stderr, "usage: loco cron add|list|run-now")
 		return 1
 	}
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -428,12 +428,12 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 1
 		}
 		if flags.NArg() != 0 || *schedule == "" || *command == "" {
-			fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--timeout D] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--timeout D] [--json]")
 			return 1
 		}
 		env, err := parseEnvPairs(envPairs)
 		if err != nil {
-			fmt.Fprintf(stderr, "%v\n", err)
+			_, _ = fmt.Fprintf(stderr, "%v\n", err)
 			return 1
 		}
 		timeoutMS := int64(0)
@@ -445,20 +445,20 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		spec := cronjob.Spec{Schedule: *schedule, Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Env: env, PassthroughEnv: passthrough, TimeoutMS: timeoutMS}
 		data, _ := json.Marshal(spec)
 		if _, err := cronjob.DecodeSpec(data); err != nil {
-			fmt.Fprintf(stderr, "invalid cron job: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "invalid cron job: %v\n", err)
 			return 1
 		}
 		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, registry.PutInput{Name: name, Kind: "cron", Spec: data})
 		if err != nil {
-			fmt.Fprintf(stderr, "add cron job: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "add cron job: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
-			fmt.Fprintf(stdout, "cron job %s stored (revision %d)\n", name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "cron job %s stored (revision %d)\n", name, result.Revision)
 		} else {
-			fmt.Fprintf(stdout, "cron job %s unchanged (revision %d)\n", name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "cron job %s unchanged (revision %d)\n", name, result.Revision)
 		}
 		return 0
 	case "list":
@@ -469,12 +469,12 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco cron list [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron list [--json]")
 			return 1
 		}
 		doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
 		if err != nil {
-			fmt.Fprintf(stderr, "list cron jobs: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "list cron jobs: %v\n", err)
 			return 2
 		}
 		jobs := make(map[string]registry.Job)
@@ -489,7 +489,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 0
 		}
 		if len(jobs) == 0 {
-			fmt.Fprintln(stdout, "No cron jobs.")
+			_, _ = fmt.Fprintln(stdout, "No cron jobs.")
 			return 0
 		}
 		names := make([]string, 0, len(jobs))
@@ -498,16 +498,16 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		}
 		sort.Strings(names)
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
+		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
 		for _, name := range names {
 			spec, _ := cronjob.DecodeSpec(jobs[name].Spec)
-			fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
 		}
 		_ = table.Flush()
 		return 0
 	case "run-now":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
 			return 1
 		}
 		flags := flag.NewFlagSet("cron run-now", flag.ContinueOnError)
@@ -517,23 +517,23 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron run-now NAME [--json]")
 			return 1
 		}
 		result, err := daemon.CronRunNow(context.Background(), p.Socket, 2*time.Second, args[1])
 		if err != nil {
-			fmt.Fprintf(stderr, "run cron job: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "run cron job: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else {
-			fmt.Fprintf(stdout, "cron job %s accepted (run %s)\n", result.Job, result.RunID)
+			_, _ = fmt.Fprintf(stdout, "cron job %s accepted (run %s)\n", result.Job, result.RunID)
 		}
 		return 0
 	case "remove":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
 			return 1
 		}
 		flags := flag.NewFlagSet("cron remove", flag.ContinueOnError)
@@ -543,13 +543,13 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron remove NAME [--json]")
 			return 1
 		}
 		return removeJob(p, args[1], "cron", globalJSON || *jsonFlag, stdout, stderr)
 	case "pause", "resume":
 		if len(args) < 2 {
-			fmt.Fprintf(stderr, "usage: loco cron %s NAME [--json]\n", args[0])
+			_, _ = fmt.Fprintf(stderr, "usage: loco cron %s NAME [--json]\n", args[0])
 			return 1
 		}
 		flags := flag.NewFlagSet("cron "+args[0], flag.ContinueOnError)
@@ -559,12 +559,12 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintf(stderr, "usage: loco cron %s NAME [--json]\n", args[0])
+			_, _ = fmt.Fprintf(stderr, "usage: loco cron %s NAME [--json]\n", args[0])
 			return 1
 		}
 		return setCronPaused(p, args[1], args[0] == "pause", globalJSON || *jsonFlag, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown cron command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown cron command %q\n", args[0])
 		return 1
 	}
 }
@@ -574,30 +574,30 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 func setCronPaused(p paths.Paths, name string, paused bool, jsonOut bool, stdout, stderr io.Writer) int {
 	doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
 	if err != nil {
-		fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
+		_, _ = fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
 		return 2
 	}
 	job, ok := doc.Jobs[name]
 	if !ok || job.Kind != "cron" {
-		fmt.Fprintf(stderr, "cron job %q not found\n", name)
+		_, _ = fmt.Fprintf(stderr, "cron job %q not found\n", name)
 		return 1
 	}
 	spec, err := cronjob.DecodeSpec(job.Spec)
 	if err != nil {
-		fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
+		_, _ = fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
 		return 1
 	}
 	spec.Paused = paused
 	raw, _ := json.Marshal(spec)
 	result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, registry.PutInput{Name: name, Kind: "cron", Spec: raw})
 	if err != nil {
-		fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
+		_, _ = fmt.Fprintf(stderr, "cron %s: %v\n", pausedVerb(paused), err)
 		return 2
 	}
 	if jsonOut {
 		_ = json.NewEncoder(stdout).Encode(result)
 	} else {
-		fmt.Fprintf(stdout, "cron job %s %s (revision %d)\n", name, pausedVerb(paused)+"d", result.Revision)
+		_, _ = fmt.Fprintf(stdout, "cron job %s %s (revision %d)\n", name, pausedVerb(paused)+"d", result.Revision)
 	}
 	return 0
 }
@@ -643,40 +643,40 @@ func readEvents(socket, topic, cursor string, limit int, wait bool, timeout time
 func removeJob(p paths.Paths, name, kind string, jsonOut bool, stdout, stderr io.Writer) int {
 	doc, err := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
 	if err != nil {
-		fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
+		_, _ = fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
 		return 2
 	}
 	job, ok := doc.Jobs[name]
 	if !ok {
-		fmt.Fprintf(stderr, "%s %q not found\n", kind, name)
+		_, _ = fmt.Fprintf(stderr, "%s %q not found\n", kind, name)
 		return 1
 	}
 	if job.Kind != kind {
-		fmt.Fprintf(stderr, "%q is a %s, not a %s\n", name, job.Kind, kind)
+		_, _ = fmt.Fprintf(stderr, "%q is a %s, not a %s\n", name, job.Kind, kind)
 		return 1
 	}
 	result, err := daemon.RegistryDelete(context.Background(), p.Socket, 2*time.Second, name)
 	if err != nil {
-		fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
+		_, _ = fmt.Fprintf(stderr, "remove %s: %v\n", kind, err)
 		return 2
 	}
 	if jsonOut {
 		_ = json.NewEncoder(stdout).Encode(result)
 	} else {
-		fmt.Fprintf(stdout, "%s %s removed (revision %d)\n", kind, name, result.Revision)
+		_, _ = fmt.Fprintf(stdout, "%s %s removed (revision %d)\n", kind, name, result.Revision)
 	}
 	return 0
 }
 
 func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: loco svc add|list|start|stop|restart")
+		_, _ = fmt.Fprintln(stderr, "usage: loco svc add|list|start|stop|restart")
 		return 1
 	}
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -696,31 +696,31 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 || *command == "" {
-			fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
 			return 1
 		}
 		env, envErr := parseEnvPairs(envPairs)
 		if envErr != nil {
-			fmt.Fprintf(stderr, "%v\n", envErr)
+			_, _ = fmt.Fprintf(stderr, "%v\n", envErr)
 			return 1
 		}
 		spec := service.Spec{Command: []string{"/bin/sh", "-lc", *command}, WorkingDir: *workingDir, Env: env, PassthroughEnv: passthrough, Restart: *restart, Enabled: true, BackoffInitial: initial.Milliseconds(), BackoffMax: maximum.Milliseconds()}
 		raw, _ := json.Marshal(spec)
 		if _, err := service.DecodeSpec(raw); err != nil {
-			fmt.Fprintf(stderr, "invalid service: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "invalid service: %v\n", err)
 			return 1
 		}
 		result, err := daemon.RegistryPut(context.Background(), p.Socket, 2*time.Second, registry.PutInput{Name: name, Kind: "svc", Spec: raw})
 		if err != nil {
-			fmt.Fprintf(stderr, "add service: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "add service: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
-			fmt.Fprintf(stdout, "service %s stored and starting (revision %d)\n", name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "service %s stored and starting (revision %d)\n", name, result.Revision)
 		} else {
-			fmt.Fprintf(stdout, "service %s unchanged (revision %d)\n", name, result.Revision)
+			_, _ = fmt.Fprintf(stdout, "service %s unchanged (revision %d)\n", name, result.Revision)
 		}
 		return 0
 	case "list":
@@ -731,12 +731,12 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco svc list [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc list [--json]")
 			return 1
 		}
 		result, err := daemon.ServiceList(context.Background(), p.Socket, 2*time.Second)
 		if err != nil {
-			fmt.Fprintf(stderr, "list services: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "list services: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
@@ -744,19 +744,19 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 0
 		}
 		if len(result.Services) == 0 {
-			fmt.Fprintln(stdout, "No services.")
+			_, _ = fmt.Fprintln(stdout, "No services.")
 			return 0
 		}
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "NAME\tSTATE\tPID\tRESTARTS")
+		_, _ = fmt.Fprintln(table, "NAME\tSTATE\tPID\tRESTARTS")
 		for _, item := range result.Services {
-			fmt.Fprintf(table, "%s\t%s\t%d\t%d\n", item.Name, item.State, item.PID, item.Restarts)
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%d\t%d\n", item.Name, item.State, item.PID, item.Restarts)
 		}
 		_ = table.Flush()
 		return 0
 	case "start", "stop", "restart":
 		if len(args) < 2 {
-			fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
+			_, _ = fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
 			return 1
 		}
 		flags := flag.NewFlagSet("svc "+args[0], flag.ContinueOnError)
@@ -766,23 +766,23 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
+			_, _ = fmt.Fprintf(stderr, "usage: loco svc %s NAME [--json]\n", args[0])
 			return 1
 		}
 		result, err := daemon.ServiceControl(context.Background(), p.Socket, 2*time.Second, args[1], args[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "%s service: %v\n", args[0], err)
+			_, _ = fmt.Fprintf(stderr, "%s service: %v\n", args[0], err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else {
-			fmt.Fprintf(stdout, "service %s %s\n", result.Name, result.State)
+			_, _ = fmt.Fprintf(stdout, "service %s %s\n", result.Name, result.State)
 		}
 		return 0
 	case "remove":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
 			return 1
 		}
 		flags := flag.NewFlagSet("svc remove", flag.ContinueOnError)
@@ -792,27 +792,27 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc remove NAME [--json]")
 			return 1
 		}
 		// registry.delete triggers a service Reload in the daemon, which stops the
 		// now-absent service, so a separate stop call isn't required.
 		return removeJob(p, args[1], "svc", globalJSON || *jsonFlag, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown svc command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown svc command %q\n", args[0])
 		return 1
 	}
 }
 
 func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: loco events emit|read|ack")
+		_, _ = fmt.Fprintln(stderr, "usage: loco events emit|read|ack")
 		return 1
 	}
 	switch args[0] {
 	case "emit":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -826,29 +826,29 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 || *data == "" {
-			fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]")
 			return 1
 		}
 		if !json.Valid([]byte(*data)) {
-			fmt.Fprintln(stderr, "event data must be valid JSON")
+			_, _ = fmt.Fprintln(stderr, "event data must be valid JSON")
 			return 1
 		}
 		result, err := daemon.EventsEmit(context.Background(), p.Socket, 5*time.Second, events.EmitInput{Topic: topic, ID: *id, SourceJob: *source, Payload: json.RawMessage(*data)})
 		if err != nil {
-			fmt.Fprintf(stderr, "emit event: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "emit event: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Emitted {
-			fmt.Fprintf(stdout, "event %s emitted on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
+			_, _ = fmt.Fprintf(stdout, "event %s emitted on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
 		} else {
-			fmt.Fprintf(stdout, "event %s already exists on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
+			_, _ = fmt.Fprintf(stdout, "event %s already exists on %s (seq %d)\n", result.Event.ID, topic, result.Event.Seq)
 		}
 		return 0
 	case "read":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -863,18 +863,18 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 || *cursor == "" {
-			fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--wait [--timeout D]] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--limit N] [--wait [--timeout D]] [--json]")
 			return 1
 		}
 		if *wait && *limit == 0 {
 			// --wait for events but --limit 0 (return none) is contradictory and would
 			// block for the whole timeout while data sits unread.
-			fmt.Fprintln(stderr, "--wait requires a positive --limit")
+			_, _ = fmt.Fprintln(stderr, "--wait requires a positive --limit")
 			return 1
 		}
 		result, err := readEvents(p.Socket, topic, *cursor, *limit, *wait, *waitTimeout)
 		if err != nil {
-			fmt.Fprintf(stderr, "read events: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "read events: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
@@ -888,7 +888,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "peek":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco events peek TOPIC [--tail N] [--from-seq S] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events peek TOPIC [--tail N] [--from-seq S] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -901,12 +901,12 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco events peek TOPIC [--tail N] [--from-seq S] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events peek TOPIC [--tail N] [--from-seq S] [--json]")
 			return 1
 		}
 		result, err := daemon.EventsPeek(context.Background(), p.Socket, 5*time.Second, topic, *tail, *fromSeq)
 		if err != nil {
-			fmt.Fprintf(stderr, "peek events: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "peek events: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
@@ -920,7 +920,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "ack":
 		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -933,20 +933,20 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 || *cursor == "" || *through == "" {
-			fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
 			return 1
 		}
 		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through)
 		if err != nil {
-			fmt.Fprintf(stderr, "ack events: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "ack events: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
-			fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
 		} else {
-			fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+			_, _ = fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
 		}
 		return 0
 	case "list":
@@ -957,12 +957,12 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 1
 		}
 		if flags.NArg() != 0 {
-			fmt.Fprintln(stderr, "usage: loco events list [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events list [--json]")
 			return 1
 		}
 		overview, err := daemon.StatusOverview(context.Background(), p.Socket, 2*time.Second)
 		if err != nil {
-			fmt.Fprintf(stderr, "list topics: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "list topics: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
@@ -973,22 +973,22 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			return 0
 		}
 		if len(overview.Topics) == 0 {
-			fmt.Fprintln(stdout, "No topics.")
+			_, _ = fmt.Fprintln(stdout, "No topics.")
 			return 0
 		}
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(table, "TOPIC\tLATEST\tRETAINED\tCURSORS\tNOTE")
+		_, _ = fmt.Fprintln(table, "TOPIC\tLATEST\tRETAINED\tCURSORS\tNOTE")
 		for _, topic := range overview.Topics {
 			note := ""
 			if topic.Error != "" {
 				note = "unreadable: " + topic.Error
 			}
-			fmt.Fprintf(table, "%s\t%d\t%d\t%d\t%s\n", topic.Name, topic.LatestSeq, topic.Retained, len(topic.Cursors), note)
+			_, _ = fmt.Fprintf(table, "%s\t%d\t%d\t%d\t%s\n", topic.Name, topic.LatestSeq, topic.Retained, len(topic.Cursors), note)
 		}
 		_ = table.Flush()
 		return 0
 	default:
-		fmt.Fprintf(stderr, "unknown events command %q\n", args[0])
+		_, _ = fmt.Fprintf(stderr, "unknown events command %q\n", args[0])
 		return 1
 	}
 }
@@ -1001,7 +1001,7 @@ func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loco status [--json]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco status [--json]")
 		return 1
 	}
 	result, err := daemon.StatusOverview(context.Background(), p.Socket, 2*time.Second)
@@ -1010,7 +1010,7 @@ func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 			unhealthy := daemon.Overview{SchemaVersion: daemon.SchemaVersion, Daemon: daemon.UnhealthyStatus(effectiveVersion(), err), Jobs: []daemon.JobOverview{}, Topics: []events.TopicStatus{}, Alerts: []events.Alert{}}
 			_ = json.NewEncoder(stdout).Encode(unhealthy)
 		} else {
-			fmt.Fprintf(stderr, "loco unavailable: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "loco unavailable: %v\n", err)
 		}
 		return 2
 	}
@@ -1018,21 +1018,21 @@ func runStatus(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		_ = json.NewEncoder(stdout).Encode(result)
 		return 0
 	}
-	fmt.Fprintf(stdout, "daemon healthy · %d jobs · %d topics · %d recent alerts\n", len(result.Jobs), len(result.Topics), len(result.Alerts))
+	_, _ = fmt.Fprintf(stdout, "daemon healthy · %d jobs · %d topics · %d recent alerts\n", len(result.Jobs), len(result.Topics), len(result.Alerts))
 	for _, job := range result.Jobs {
 		last := "never"
 		if job.LastRun != nil {
 			last = job.LastRun.Status
 		}
-		fmt.Fprintf(stdout, "%s  %s  %s  last=%s\n", job.Name, job.Kind, job.State, last)
+		_, _ = fmt.Fprintf(stdout, "%s  %s  %s  last=%s\n", job.Name, job.Kind, job.State, last)
 	}
 	for _, topic := range result.Topics {
 		for _, cursor := range topic.Cursors {
-			fmt.Fprintf(stdout, "%s/%s  unread=%d", topic.Name, cursor.Name, cursor.Unread)
+			_, _ = fmt.Fprintf(stdout, "%s/%s  unread=%d", topic.Name, cursor.Name, cursor.Unread)
 			if cursor.Warning != "" {
-				fmt.Fprintf(stdout, "  warning=%s", cursor.Warning)
+				_, _ = fmt.Fprintf(stdout, "  warning=%s", cursor.Warning)
 			}
-			fmt.Fprintln(stdout)
+			_, _ = fmt.Fprintln(stdout)
 		}
 	}
 	return 0
@@ -1058,7 +1058,7 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loco doctor [--json]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco doctor [--json]")
 		return 1
 	}
 
@@ -1175,13 +1175,13 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		_ = json.NewEncoder(stdout).Encode(report)
 	} else {
 		for _, check := range checks {
-			fmt.Fprintf(stdout, "%s  %s  %s\n", strings.ToUpper(check.Status), check.Name, check.Detail)
+			_, _ = fmt.Fprintf(stdout, "%s  %s  %s\n", strings.ToUpper(check.Status), check.Name, check.Detail)
 		}
 		state := "healthy"
 		if !report.Healthy {
 			state = "unhealthy"
 		}
-		fmt.Fprintf(stdout, "loco doctor: %s (%d passed, %d warnings)\n", state, passed, warnings)
+		_, _ = fmt.Fprintf(stdout, "loco doctor: %s (%d passed, %d warnings)\n", state, passed, warnings)
 	}
 	if !report.Healthy {
 		return 2
@@ -1204,27 +1204,27 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 1
 	}
 	if len(positionals) != 2 || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, usage)
+		_, _ = fmt.Fprintln(stderr, usage)
 		return 1
 	}
 	title, body := positionals[0], positionals[1]
 	// The job-failure: group namespace is reserved for automatic failure alerts; a
 	// user group there could suppress a real operator alert.
 	if strings.HasPrefix(*group, "job-failure:") {
-		fmt.Fprintln(stderr, "group prefix \"job-failure:\" is reserved for automatic failure alerts")
+		_, _ = fmt.Fprintln(stderr, "group prefix \"job-failure:\" is reserved for automatic failure alerts")
 		return 1
 	}
 	result, err := daemon.Notify(context.Background(), p.Socket, 6*time.Second, notification.Input{Title: title, Body: body, Channel: *channel, Group: *group})
 	if err != nil {
-		fmt.Fprintf(stderr, "send notification: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "send notification: %v\n", err)
 		return 2
 	}
 	if globalJSON || *jsonFlag {
 		_ = json.NewEncoder(stdout).Encode(result)
 	} else if result.Suppressed {
-		fmt.Fprintf(stdout, "notification suppressed by group %s\n", result.Group)
+		_, _ = fmt.Fprintf(stdout, "notification suppressed by group %s\n", result.Group)
 	} else {
-		fmt.Fprintln(stdout, "notification delivered")
+		_, _ = fmt.Fprintln(stdout, "notification delivered")
 	}
 	return 0
 }
@@ -1235,7 +1235,7 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 // stdio for the lifetime of the process.
 func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "serve" {
-		fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
 		return 1
 	}
 	flags := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
@@ -1247,7 +1247,7 @@ func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
 		return 1
 	}
 
@@ -1260,14 +1260,14 @@ func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
 		// Same charset rule the event store enforces; fail fast rather than start a
 		// half-configured server that silently never pushes.
 		if !registry.ValidName(topic) {
-			fmt.Fprintf(stderr, "invalid channel topic %q: use 1-128 letters, digits, dots, underscores, or hyphens\n", topic)
+			_, _ = fmt.Fprintf(stderr, "invalid channel topic %q: use 1-128 letters, digits, dots, underscores, or hyphens\n", topic)
 			return 1
 		}
 		cfg.Topics = append(cfg.Topics, topic)
 	}
 
 	if err := mcp.ServeChannel(context.Background(), p.Socket, effectiveVersion(), cfg, os.Stdin, stdout); err != nil {
-		fmt.Fprintf(stderr, "mcp serve: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "mcp serve: %v\n", err)
 		return 2
 	}
 	return 0
@@ -1276,12 +1276,12 @@ func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
 // runRuns lists a cron/svc job's recorded runs (from RunsDir, written by the daemon).
 func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: loco runs JOB [--last N] [--failed] [--json]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco runs JOB [--last N] [--failed] [--json]")
 		return 1
 	}
 	job := args[0]
 	if !registry.ValidName(job) {
-		fmt.Fprintf(stderr, "invalid job name %q\n", job)
+		_, _ = fmt.Fprintf(stderr, "invalid job name %q\n", job)
 		return 1
 	}
 	flags := flag.NewFlagSet("runs", flag.ContinueOnError)
@@ -1293,12 +1293,12 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loco runs JOB [--last N] [--failed] [--json]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco runs JOB [--last N] [--failed] [--json]")
 		return 1
 	}
 	records, err := loadRunRecords(filepath.Join(p.RunsDir, job))
 	if err != nil {
-		fmt.Fprintf(stderr, "read runs for %q: %v\n", job, err)
+		_, _ = fmt.Fprintf(stderr, "read runs for %q: %v\n", job, err)
 		return 2
 	}
 	if *failedOnly {
@@ -1311,7 +1311,7 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		records = kept
 	}
 	if *last < 0 {
-		fmt.Fprintln(stderr, "--last cannot be negative")
+		_, _ = fmt.Fprintln(stderr, "--last cannot be negative")
 		return 1
 	}
 	if *last > 0 && len(records) > *last {
@@ -1326,14 +1326,14 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 0
 	}
 	if len(records) == 0 {
-		fmt.Fprintf(stdout, "No runs for %q.\n", job)
+		_, _ = fmt.Fprintf(stdout, "No runs for %q.\n", job)
 		return 0
 	}
 	table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(table, "RUN\tSTATUS\tEXIT\tDURATION\tTRIGGER\tFINISHED")
+	_, _ = fmt.Fprintln(table, "RUN\tSTATUS\tEXIT\tDURATION\tTRIGGER\tFINISHED")
 	for _, r := range records {
 		dur := (time.Duration(r.DurationMS) * time.Millisecond).String()
-		fmt.Fprintf(table, "%s\t%s\t%d\t%s\t%s\t%s\n", r.ID, r.Status, r.ExitCode, dur, r.Trigger, r.FinishedAt)
+		_, _ = fmt.Fprintf(table, "%s\t%s\t%d\t%s\t%s\t%s\n", r.ID, r.Status, r.ExitCode, dur, r.Trigger, r.FinishedAt)
 	}
 	_ = table.Flush()
 	return 0
@@ -1342,12 +1342,12 @@ func runRuns(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 // runLogs prints a run's captured stdout/stderr (from LogDir, written by the daemon).
 func runLogs(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: loco logs JOB [--run ID] [--stderr]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco logs JOB [--run ID] [--stderr]")
 		return 1
 	}
 	job := args[0]
 	if !registry.ValidName(job) {
-		fmt.Fprintf(stderr, "invalid job name %q\n", job)
+		_, _ = fmt.Fprintf(stderr, "invalid job name %q\n", job)
 		return 1
 	}
 	flags := flag.NewFlagSet("logs", flag.ContinueOnError)
@@ -1358,16 +1358,16 @@ func runLogs(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loco logs JOB [--run ID] [--stderr]")
+		_, _ = fmt.Fprintln(stderr, "usage: loco logs JOB [--run ID] [--stderr]")
 		return 1
 	}
 	records, err := loadRunRecords(filepath.Join(p.RunsDir, job))
 	if err != nil {
-		fmt.Fprintf(stderr, "read runs for %q: %v\n", job, err)
+		_, _ = fmt.Fprintf(stderr, "read runs for %q: %v\n", job, err)
 		return 2
 	}
 	if len(records) == 0 {
-		fmt.Fprintf(stderr, "no runs for %q\n", job)
+		_, _ = fmt.Fprintf(stderr, "no runs for %q\n", job)
 		return 1
 	}
 	var rec *cronjob.RunRecord
@@ -1381,7 +1381,7 @@ func runLogs(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			}
 		}
 		if rec == nil {
-			fmt.Fprintf(stderr, "run %q not found for job %q\n", *runID, job)
+			_, _ = fmt.Fprintf(stderr, "run %q not found for job %q\n", *runID, job)
 			return 1
 		}
 	}
@@ -1394,7 +1394,7 @@ func runLogs(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "read log: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "read log: %v\n", err)
 		return 2
 	}
 	_, _ = stdout.Write(data)
