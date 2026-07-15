@@ -162,7 +162,7 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26"
 
@@ -170,7 +170,7 @@ jobs:
       # below instead of by goreleaser, because the formula must point at
       # tap-hosted assets (see the header note on private-repo 404s).
       - name: Build release artifacts
-        uses: goreleaser/goreleaser-action@ec59f474b9834571250b370d4735c50f8e2d1e29 # v7.0.0
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: "~> v2"
           args: release --clean

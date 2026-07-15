@@ -41,13 +41,20 @@ type PutResult struct {
 	Revision      uint64 `json:"revision"`
 	Changed       bool   `json:"changed"`
 	Job           Job    `json:"job"`
+	// Warnings are non-fatal problems with an accepted job — e.g. a passthrough var
+	// that is not in the daemon's environment and will be unset at spawn. The job is
+	// still stored; these exist so the caller learns at the point of the mistake
+	// rather than from a job that quietly does nothing.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	doc  Document
-	now  func() time.Time
+	mu            sync.RWMutex
+	path          string
+	doc           Document
+	now           func() time.Time
+	specValidator SpecValidator
+	specInspector SpecInspector
 }
 
 func Open(path string) (*Store, error) {
@@ -74,12 +81,29 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Reject a spec that cannot be scheduled, at the boundary every write crosses.
+	// Load does not do this: an unschedulable job already on disk is surfaced as
+	// invalid rather than blocking the daemon's start.
+	if s.specValidator != nil {
+		if err := s.specValidator(input.Kind, input.Spec); err != nil {
+			return PutResult{}, fmt.Errorf("invalid %s spec for job %q: %w", input.Kind, input.Name, err)
+		}
+	}
+	// Warnings ride on the unchanged path too: re-running an add with a var that is
+	// still missing must say so again, or the second attempt looks like confirmation
+	// that the first one worked.
+	var warnings []string
+	if s.specInspector != nil {
+		warnings = s.specInspector(input.Kind, input.Spec)
+	}
+
 	if current, ok := s.doc.Jobs[input.Name]; ok && current.Kind == input.Kind && jsonEqual(current.Spec, input.Spec) {
 		return PutResult{
 			SchemaVersion: SchemaVersion,
 			Revision:      s.doc.Revision,
 			Changed:       false,
 			Job:           cloneJob(current),
+			Warnings:      warnings,
 		}, nil
 	}
 
@@ -107,6 +131,7 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 		Revision:      next.Revision,
 		Changed:       true,
 		Job:           cloneJob(job),
+		Warnings:      warnings,
 	}, nil
 }
 
@@ -147,6 +172,14 @@ func (s *Store) Snapshot() Document {
 // path (runs/logs) use this to reject traversal (e.g. "../x") before joining.
 func ValidName(name string) bool { return namePattern.MatchString(name) }
 
+// Validate checks a job's shape: name, kind, and that the spec is a JSON object. It
+// deliberately does NOT interpret the spec's contents — see SpecValidator.
+//
+// This runs on both the write path (Put) and the load path, and those need different
+// answers about a spec that cannot be scheduled. A caller writing one should be told
+// no; a daemon starting up with one already on disk must not refuse to start and take
+// every healthy job down with it. Contents are therefore checked via the store's
+// SpecValidator, which Put consults and load does not.
 func Validate(input PutInput) error {
 	if !namePattern.MatchString(input.Name) {
 		return fmt.Errorf("invalid job name %q: use 1-128 letters, digits, dots, underscores, or hyphens", input.Name)
@@ -165,6 +198,40 @@ func Validate(input PutInput) error {
 		return errors.New("job spec must be a JSON object")
 	}
 	return nil
+}
+
+// SpecValidator reports whether a job spec of the given kind is usable — for a cron
+// job, that its schedule parses. Registry cannot check this itself: interpreting a
+// spec means importing cronjob, and cronjob already imports registry.
+//
+// It lives here rather than at the CLI because the CLI is not the only write path.
+// `loco registry put` is a documented, first-class command, and it registered specs
+// that `loco cron add` rejects — leaving a job that shows up in `cron list` and never
+// fires. Validation belongs at the boundary every write crosses, which is Put.
+type SpecValidator func(kind string, spec []byte) error
+
+// SetSpecValidator installs the per-kind spec check used by Put. Wired by the daemon,
+// which imports both this package and cronjob. Nil disables the check, which is what
+// tests and any caller that only needs shape validation get.
+func (s *Store) SetSpecValidator(validator SpecValidator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specValidator = validator
+}
+
+// SpecInspector returns non-fatal warnings about an otherwise-valid spec. Like
+// SpecValidator it is injected, but it must also run in the daemon's process for a
+// second reason: the thing worth warning about — a passthrough var missing from the
+// environment jobs are spawned with — is only observable there. Checking in the CLI
+// would inspect the user's shell, which is exactly the environment that does NOT
+// apply, and would stay silent in the case that actually bites.
+type SpecInspector func(kind string, spec []byte) []string
+
+// SetSpecInspector installs the warning hook used by Put. Nil disables warnings.
+func (s *Store) SetSpecInspector(inspector SpecInspector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specInspector = inspector
 }
 
 func load(path string) (Document, error) {

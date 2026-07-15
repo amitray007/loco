@@ -104,6 +104,52 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// Verbs each subcommand group accepts, in the order its usage line lists them.
+// These are the single source of truth: the usage string is rendered from the
+// list rather than hand-written beside the switch, so a verb cannot be added to
+// one and forgotten in the other. Keep each list in sync with its switch.
+//
+// These lists cover every verb the group dispatches, which is deliberately not
+// the same set as the top-level `usage` text. `daemon watchdog` is invoked by a
+// launchd/systemd timer (see launchd.RenderWatchdogPlist), not typed by hand, so
+// it is listed here — asking a group what it accepts should not omit a verb that
+// works — but stays out of the top-level help, which is for verbs people choose
+// to run. Its absence there is intentional, not drift.
+var (
+	daemonVerbs   = []string{"install", "uninstall", "status", "run", "watchdog"}
+	registryVerbs = []string{"put", "list"}
+	cronVerbs     = []string{"add", "list", "run-now", "remove", "pause", "resume"}
+	svcVerbs      = []string{"add", "list", "start", "stop", "restart", "remove"}
+	eventsVerbs   = []string{"emit", "read", "peek", "ack", "list"}
+)
+
+// groupUsage renders the usage line for a subcommand group, e.g.
+// "usage: loco cron add|list|run-now|remove|pause|resume".
+func groupUsage(group string, verbs []string) string {
+	return "usage: loco " + group + " " + strings.Join(verbs, "|")
+}
+
+// isHelpArg reports whether arg asks for help. Subcommand groups route these to
+// their usage line; without it `loco cron --help` errors as an unknown verb,
+// which sends people looking for a removal verb that does exist.
+func isHelpArg(arg string) bool {
+	return arg == "help" || arg == "--help" || arg == "-h"
+}
+
+// groupHelp prints a group's usage to stdout and returns 0. Bare `loco cron`
+// (no args) is a usage error and prints to stderr with exit 1; an explicit
+// `loco cron --help` is a successful request and prints to stdout with exit 0.
+func groupHelp(group string, verbs []string, stdout io.Writer) int {
+	_, _ = fmt.Fprintln(stdout, groupUsage(group, verbs))
+	return 0
+}
+
+// groupUsageError prints a group's usage to stderr and returns 1.
+func groupUsageError(group string, verbs []string, stderr io.Writer) int {
+	_, _ = fmt.Fprintln(stderr, groupUsage(group, verbs))
+	return 1
+}
+
 // stringList is a flag.Value that accumulates repeated flag occurrences, e.g.
 // --env A=1 --env B=2.
 type stringList []string
@@ -112,6 +158,16 @@ func (s *stringList) String() string { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+// printPutWarnings surfaces a stored job's non-fatal warnings. They go to stderr: the
+// job WAS stored, so stdout's success line stays parseable, but a warning that only
+// appeared in --json would be invisible to the interactive user making the mistake.
+// JSON callers get them on the result itself.
+func printPutWarnings(warnings []string, stderr io.Writer) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(stderr, "warning: %s\n", warning)
+	}
 }
 
 // parseEnvPairs splits KEY=VALUE strings into a map, rejecting malformed entries.
@@ -195,8 +251,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprint(stderr, "usage: loco daemon install|uninstall|status|run\n")
-		return 1
+		return groupUsageError("daemon", daemonVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("daemon", daemonVerbs, stdout)
 	}
 
 	switch args[0] {
@@ -315,8 +373,10 @@ func runDaemon(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 
 func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco registry put|list")
-		return 1
+		return groupUsageError("registry", registryVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("registry", registryVerbs, stdout)
 	}
 
 	switch args[0] {
@@ -348,6 +408,7 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			_, _ = fmt.Fprintf(stderr, "put registry entry: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -403,8 +464,10 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 
 func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco cron add|list|run-now")
-		return 1
+		return groupUsageError("cron", cronVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("cron", cronVerbs, stdout)
 	}
 	switch args[0] {
 	case "add":
@@ -453,6 +516,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			_, _ = fmt.Fprintf(stderr, "add cron job: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -498,10 +562,22 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		}
 		sort.Strings(names)
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
+		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND\tSTATE")
 		for _, name := range names {
-			spec, _ := cronjob.DecodeSpec(jobs[name].Spec)
-			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
+			// A job whose spec will not decode cannot be scheduled and never fires.
+			// This used to discard the error and print the zero-value spec, so such a
+			// job rendered as blank columns — the one view that should expose it
+			// swallowed the evidence. Report the reason instead.
+			spec, err := cronjob.DecodeSpec(jobs[name].Spec)
+			if err != nil {
+				_, _ = fmt.Fprintf(table, "%s\t-\t-\tinvalid: %v\n", name, err)
+				continue
+			}
+			state := "scheduled"
+			if spec.Paused {
+				state = "paused"
+			}
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "), state)
 		}
 		_ = table.Flush()
 		return 0
@@ -670,8 +746,10 @@ func removeJob(p paths.Paths, name, kind string, jsonOut bool, stdout, stderr io
 
 func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco svc add|list|start|stop|restart")
-		return 1
+		return groupUsageError("svc", svcVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("svc", svcVerbs, stdout)
 	}
 	switch args[0] {
 	case "add":
@@ -715,6 +793,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			_, _ = fmt.Fprintf(stderr, "add service: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -806,8 +885,10 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 
 func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: loco events emit|read|ack")
-		return 1
+		return groupUsageError("events", eventsVerbs, stderr)
+	}
+	if isHelpArg(args[0]) {
+		return groupHelp("events", eventsVerbs, stdout)
 	}
 	switch args[0] {
 	case "emit":
