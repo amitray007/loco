@@ -60,7 +60,7 @@ Usage:
   loco [--config-dir DIR] status [--json]
   loco [--config-dir DIR] doctor [--json]
   loco [--config-dir DIR] notify TITLE BODY [--channel desktop|file] [--group KEY]
-  loco [--config-dir DIR] mcp serve
+  loco [--config-dir DIR] mcp serve [--channel-topics a,b]
   loco version
 
 Commands:
@@ -91,6 +91,7 @@ Commands:
   doctor             Check the local daemon and durable spine without mutations
   notify             Send a grouped human notification
   mcp serve          Run a stdio MCP server exposing the daemon to AI agents
+                     (--channel-topics pushes those topics into the session)
   version            Print the loco version
 
 Exit codes:
@@ -1234,11 +1235,39 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 // run() in favor of os.Stdin/os.Stdout directly — the MCP transport owns stdio for the
 // lifetime of the process.
 func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
-	if len(args) != 1 || args[0] != "serve" {
-		fmt.Fprintln(stderr, "usage: loco mcp serve")
+	if len(args) == 0 || args[0] != "serve" {
+		fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
 		return 1
 	}
-	if err := mcp.ServeVersion(context.Background(), p.Socket, effectiveVersion(), os.Stdin, stdout); err != nil {
+	flags := flag.NewFlagSet("mcp serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	topics := flags.String("channel-topics", os.Getenv("LOCO_CHANNEL_TOPICS"),
+		"comma-separated topics to push into the session as channel events (default none)")
+	poll := flags.Duration("channel-poll", 0, "how often to check for new events (default 1s)")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
+		return 1
+	}
+
+	cfg := mcp.ChannelConfig{Poll: *poll}
+	for _, topic := range strings.Split(*topics, ",") {
+		topic = strings.TrimSpace(topic)
+		if topic == "" {
+			continue
+		}
+		// Same charset rule the event store enforces; fail fast rather than start a
+		// half-configured server that silently never pushes.
+		if !registry.ValidName(topic) {
+			fmt.Fprintf(stderr, "invalid channel topic %q: use 1-128 letters, digits, dots, underscores, or hyphens\n", topic)
+			return 1
+		}
+		cfg.Topics = append(cfg.Topics, topic)
+	}
+
+	if err := mcp.ServeChannel(context.Background(), p.Socket, effectiveVersion(), cfg, os.Stdin, stdout); err != nil {
 		fmt.Fprintf(stderr, "mcp serve: %v\n", err)
 		return 2
 	}
