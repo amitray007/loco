@@ -348,6 +348,9 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			Topic   string `json:"topic"`
 			Cursor  string `json:"cursor"`
 			Through string `json:"through"`
+			// Absent decodes to nil, i.e. the watermark ack a caller predating this field
+			// is asking for. Present means "these are the ids I processed".
+			IDs []string `json:"ids"`
 			// Absent decodes to false, i.e. strict. A caller that predates this field
 			// gets the safe behaviour rather than the silent one.
 			AllowSkip bool `json:"allow_skip"`
@@ -356,7 +359,24 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode ack request: " + err.Error()})
 			return
 		}
-		result, err := eventStore.Ack(request.Topic, request.Cursor, request.Through, request.AllowSkip)
+		// through and ids mean different things — a watermark versus the set you
+		// processed — so a request carrying both is ambiguous. Picking one silently would
+		// hand a caller that meant "watermark" the contiguous-run semantics instead, which
+		// is the silent-wrong-behaviour class this bus keeps trying to close. The CLI and
+		// MCP both reject it before it gets here; enforce it where the invariant belongs
+		// rather than trusting two callers to keep agreeing.
+		if (request.Through == "") == (len(request.IDs) == 0) {
+			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion,
+				Error: "ack requires exactly one of through (watermark) or ids (the ids you processed)"})
+			return
+		}
+		var result events.AckResult
+		var err error
+		if len(request.IDs) > 0 {
+			result, err = eventStore.AckIDs(request.Topic, request.Cursor, request.IDs, request.AllowSkip)
+		} else {
+			result, err = eventStore.Ack(request.Topic, request.Cursor, request.Through, request.AllowSkip)
+		}
 		if err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return

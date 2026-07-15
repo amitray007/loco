@@ -143,9 +143,14 @@ At-least-once: reading does NOT advance the cursor.
 **Use when:** every loop tick. Empty array + exit 0 = quiet cycle, done in
 one call.
 
-### `loco events ack <topic> --cursor <name> --through <event-id>`
+### `loco events ack <topic> --cursor <name> (--ids <id,…> | --through <id>)`
 Explicit cursor commit. Separate from `read` so an agent that crashes
 mid-processing re-reads the same events instead of losing them.
+`--ids` names the events you processed: the cursor advances over the longest
+contiguous run and stops at the first one you did not name, so a batch with a
+failure in the middle no longer consumes the failure. Ids above the gap are
+reported and redelivered. `--through` is a watermark — it consumes that event
+and everything below it, processed or not.
 **Use when:** after the work for those events actually completed (conductor
 reported, state merged) — not before.
 

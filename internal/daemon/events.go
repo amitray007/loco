@@ -35,13 +35,19 @@ func EventsPeek(ctx context.Context, socket string, timeout time.Duration, topic
 	err := eventRequest(ctx, socket, timeout, "events.peek", request, &result)
 	return result, err
 }
-func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string, allowSkip bool) (events.AckResult, error) {
+
+// EventsAck acks by watermark (through, everything at or below it) or by processed ids
+// (ids, the longest contiguous run). Exactly one must be set: the daemon rejects a request
+// carrying both or neither, since guessing which a caller meant is how an ack consumes
+// something nobody processed.
+func EventsAck(ctx context.Context, socket string, timeout time.Duration, topic, cursor, through string, ids []string, allowSkip bool) (events.AckResult, error) {
 	request := struct {
-		Topic     string `json:"topic"`
-		Cursor    string `json:"cursor"`
-		Through   string `json:"through"`
-		AllowSkip bool   `json:"allow_skip"`
-	}{topic, cursor, through, allowSkip}
+		Topic     string   `json:"topic"`
+		Cursor    string   `json:"cursor"`
+		Through   string   `json:"through"`
+		IDs       []string `json:"ids,omitempty"`
+		AllowSkip bool     `json:"allow_skip"`
+	}{topic, cursor, through, ids, allowSkip}
 	var result events.AckResult
 	err := eventRequest(ctx, socket, timeout, "events.ack", request, &result)
 	return result, err

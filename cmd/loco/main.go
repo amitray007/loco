@@ -123,6 +123,12 @@ var (
 	eventsVerbs   = []string{"emit", "read", "peek", "ack", "list"}
 )
 
+// ackUsage is one string for both of ack's usage sites. They used to be two literals and
+// drifted: the arg-count guard kept printing a stale line that omitted --allow-skip, so
+// the flag was undiscoverable from the CLI's own help (#19, itself a recurrence of #11).
+// One constant makes that drift unrepresentable rather than merely fixed.
+const ackUsage = "usage: loco events ack TOPIC --cursor NAME (--ids ID[,ID...] | --through ID) [--allow-skip] [--json]"
+
 // groupUsage renders the usage line for a subcommand group, e.g.
 // "usage: loco cron add|list|run-now|remove|pause|resume".
 func groupUsage(group string, verbs []string) string {
@@ -1002,7 +1008,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "ack":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
+			_, _ = fmt.Fprintln(stderr, ackUsage)
 			return 1
 		}
 		topic := args[1]
@@ -1010,16 +1016,30 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		flags.SetOutput(stderr)
 		cursor := flags.String("cursor", "", "consumer cursor")
 		through := flags.String("through", "", "event ID")
+		ids := flags.String("ids", "", "comma-separated event IDs you processed")
 		allowSkip := flags.Bool("allow-skip", false, "consume events this cursor never read instead of erroring")
 		jsonFlag := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
-		if flags.NArg() != 0 || *cursor == "" || *through == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
+		// Exactly one of --through/--ids. They mean different things — a watermark versus
+		// the set you processed — and guessing which one a caller meant is how the silent
+		// consumption in #16 happens in the first place.
+		if flags.NArg() != 0 || *cursor == "" || (*through == "") == (*ids == "") {
+			_, _ = fmt.Fprintln(stderr, ackUsage)
 			return 1
 		}
-		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through, *allowSkip)
+		var idList []string
+		for _, id := range strings.Split(*ids, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				idList = append(idList, id)
+			}
+		}
+		if *ids != "" && len(idList) == 0 {
+			_, _ = fmt.Fprintln(stderr, "--ids listed no event ids")
+			return 1
+		}
+		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through, idList, *allowSkip)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "ack events: %v\n", err)
 			return 2
@@ -1031,10 +1051,17 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		// Report the blast radius even when nothing was skipped: `ack --through ID`
 		// reads like one message but consumes everything below it, and the count is
 		// the only thing at the call site that shows it.
-		if result.Changed {
+		switch {
+		case result.Changed:
 			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d), consuming %d event(s)\n",
 				result.Cursor, result.ThroughID, result.ThroughSeq, result.AckedCount)
-		} else {
+		case result.BlockedBy != "":
+			// --ids where nothing was contiguous: the watermark cannot move at all, so
+			// there is no "through" event to name. Saying "already at or past" here would
+			// report success for an ack that consumed nothing.
+			_, _ = fmt.Fprintf(stdout, "cursor %s did not advance: %s is unprocessed and blocks everything above it\n",
+				result.Cursor, result.BlockedBy)
+		default:
 			_, _ = fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
 		}
 		if result.SkippedUnread > 0 {
@@ -1043,6 +1070,14 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		if result.StrictNotEnforced {
 			_, _ = fmt.Fprintf(stderr, "warning: cursor %s predates read tracking; strict ack was not enforced. "+
 				"Recreate the cursor to get strict protection on future acks.\n", result.Cursor)
+		}
+		// Not a warning: held-back ids are the mechanism working as designed. Crying wolf
+		// on the healthy path is how a channel gets filtered out (the #19 lesson). But it
+		// must be said — the consumer reported work that is not yet consumed, and silence
+		// would let it believe otherwise.
+		if result.HeldBack > 0 {
+			_, _ = fmt.Fprintf(stderr, "note: %d acked id(s) were not consumed — %s is unprocessed and blocks them; "+
+				"they will be redelivered until it clears.\n", result.HeldBack, result.BlockedBy)
 		}
 		return 0
 	case "list":
