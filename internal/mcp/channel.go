@@ -46,10 +46,16 @@ type pushFunc func(topic string, ev events.Event)
 // It blocks until ctx is done.
 func runTail(ctx context.Context, socket string, cfg ChannelConfig, push pushFunc) {
 	// high[topic] = the highest seq already seen. Established at startup so pre-existing
-	// events are never replayed into a fresh session.
+	// events are never replayed into a fresh session. If ctx is cancelled while we are
+	// still establishing high-water marks (e.g. the session ends while the daemon is
+	// down), abort immediately rather than proceeding with a false 0 for any topic.
 	high := make(map[string]uint64, len(cfg.Topics))
 	for _, topic := range cfg.Topics {
-		high[topic] = latestSeq(ctx, socket, topic)
+		seq, ok := latestSeq(ctx, socket, topic)
+		if !ok {
+			return
+		}
+		high[topic] = seq
 	}
 
 	ticker := time.NewTicker(cfg.poll())
@@ -79,13 +85,36 @@ func runTail(ctx context.Context, socket string, cfg ChannelConfig, push pushFun
 	}
 }
 
-// latestSeq returns the highest seq currently on a topic, or 0 if the topic does not
-// exist yet or cannot be read (in which case the tail simply starts from the beginning
-// of that topic's future).
-func latestSeq(ctx context.Context, socket, topic string) uint64 {
-	result, err := daemon.EventsPeek(ctx, socket, callTimeout, topic, 1, 0)
-	if err != nil || len(result.Events) == 0 {
-		return 0
+// latestSeqRetryBackoff bounds how long latestSeq waits between retries while the daemon
+// is unreachable at startup. Short, because the daemon dials fail fast (registry.dial
+// returns immediately on ECONNREFUSED/ENOENT) — this is purely pacing, not a timeout.
+const latestSeqRetryBackoff = 200 * time.Millisecond
+
+// latestSeq returns the highest seq currently on a topic. An EMPTY topic (no error, zero
+// events — the topic does not exist yet or has never been written to) correctly returns
+// (0, true): the tail starts from the beginning of that topic's future, which is exactly
+// what "no backlog exists" means. An ERROR (daemon down/restarting) is a DIFFERENT state
+// and must never be treated as empty: doing so would establish a false high-water mark
+// of 0, and the first successful poll would then replay the topic's entire retained
+// backlog into a fresh session — precisely what D4 forbids. So on error, this retries
+// with a bounded backoff until the daemon answers, honoring ctx cancellation throughout
+// (the session may end while the daemon is still down). Returns ok=false only when ctx
+// is done before a real answer was obtained; callers must not use the returned seq (0)
+// in that case.
+func latestSeq(ctx context.Context, socket, topic string) (uint64, bool) {
+	for {
+		result, err := daemon.EventsPeek(ctx, socket, callTimeout, topic, 1, 0)
+		if err == nil {
+			if len(result.Events) == 0 {
+				return 0, true
+			}
+			return result.Events[len(result.Events)-1].Seq, true
+		}
+		fmt.Fprintf(os.Stderr, "loco channel: establishing high-water mark for %s: %v; retrying\n", topic, err)
+		select {
+		case <-ctx.Done():
+			return 0, false
+		case <-time.After(latestSeqRetryBackoff):
+		}
 	}
-	return result.Events[len(result.Events)-1].Seq
 }

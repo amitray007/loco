@@ -1231,9 +1231,8 @@ func runNotify(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 
 // runMCP dispatches `loco mcp serve`, which runs a stdio MCP server exposing the loco
 // daemon to AI agents as MCP tools. It reads newline-delimited JSON-RPC requests from
-// stdin and writes responses to stdout, so it deliberately ignores the stdout passed to
-// run() in favor of os.Stdin/os.Stdout directly — the MCP transport owns stdio for the
-// lifetime of the process.
+// os.Stdin and writes responses to the stdout passed to run() — the MCP transport owns
+// stdio for the lifetime of the process.
 func runMCP(args []string, p paths.Paths, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "serve" {
 		fmt.Fprintln(stderr, "usage: loco mcp serve [--channel-topics a,b] [--channel-poll D]")
