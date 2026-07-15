@@ -69,6 +69,12 @@ type AckResult struct {
 	// SkippedUnread is how many of those were never returned by a read on this cursor.
 	// Non-zero means the ack consumed events the consumer cannot have processed.
 	SkippedUnread int `json:"skipped_unread"`
+	// StrictNotEnforced marks an ack that skipped unread events and was allowed through
+	// only because the cursor predates read tracking. Without it the compat path is
+	// indistinguishable from an enforced one that found nothing to skip: both are a
+	// silent success. A consumer that upgraded and assumes strict now covers it is
+	// exactly the reader #7 was written for, so say so rather than let it infer.
+	StrictNotEnforced bool `json:"strict_not_enforced,omitempty"`
 }
 type CompactResult struct {
 	SchemaVersion  int      `json:"schema_version"`
@@ -436,6 +442,7 @@ func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckRes
 		SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName,
 		ThroughID: throughID, ThroughSeq: seq, Changed: changed,
 		AckedCount: ackedCount, SkippedUnread: skippedUnread,
+		StrictNotEnforced: skippedUnread > 0 && !allowSkip && unknownReadHistory,
 	}, nil
 }
 

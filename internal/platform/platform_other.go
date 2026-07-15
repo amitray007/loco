@@ -25,3 +25,7 @@ func (unsupportedManager) Uninstall(context.Context, paths.Paths) (bool, error) 
 }
 
 func Manager() ServiceManager { return unsupportedManager{} }
+
+// RestartHint has no OS-managed service to name here, so it describes the manual
+// equivalent rather than inventing a command that does not exist.
+func RestartHint() string { return "stop and re-run `loco daemon run`" }

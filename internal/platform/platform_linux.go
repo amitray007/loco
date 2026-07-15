@@ -25,3 +25,10 @@ func (systemdManager) Uninstall(ctx context.Context, p paths.Paths) (bool, error
 
 // Manager returns the Linux systemd (user units) service manager.
 func Manager() ServiceManager { return systemdManager{} }
+
+// RestartHint returns the command that restarts the daemon on this OS. `loco daemon`
+// has no restart verb — the service is systemd-managed — so a reader told only to
+// "restart the daemon" has to go find this out.
+func RestartHint() string {
+	return "systemctl --user restart " + paths.Label + ".service"
+}

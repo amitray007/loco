@@ -472,7 +472,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--timeout D] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -754,7 +754,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--backoff-initial D] [--backoff-max D] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -774,7 +774,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 || *command == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--backoff-initial D] [--backoff-max D] [--json]")
 			return 1
 		}
 		env, envErr := parseEnvPairs(envPairs)
@@ -929,7 +929,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "read":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--wait [--timeout D]] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -1002,7 +1002,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "ack":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -1039,6 +1039,10 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		}
 		if result.SkippedUnread > 0 {
 			_, _ = fmt.Fprintf(stderr, "warning: %d of those event(s) were never returned by a read on this cursor\n", result.SkippedUnread)
+		}
+		if result.StrictNotEnforced {
+			_, _ = fmt.Fprintf(stderr, "warning: cursor %s predates read tracking; strict ack was not enforced. "+
+				"Recreate the cursor to get strict protection on future acks.\n", result.Cursor)
 		}
 		return 0
 	case "list":
@@ -1182,6 +1186,22 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		add("daemon-rpc", "fail", healthErr.Error())
 	} else {
 		add("daemon-rpc", "pass", fmt.Sprintf("pid %d, uptime %s, version %s", health.PID, formatUptime(health.UptimeSeconds), health.Version))
+	}
+
+	// Upgrading the binary does not replace the running daemon, and nearly every command
+	// is served by the daemon rather than by the CLI you just installed. So a fixed bug
+	// stays broken until launchd restarts it, with no symptom saying why: the fix is on
+	// disk, the old code is in memory, and every command still works. That is #19 — v0.1.2's
+	// strict ack silently not firing because the daemon predated the upgrade. Nothing else
+	// compares the two versions, so doctor is the only place this can surface.
+	if healthErr == nil {
+		if health.Version == version {
+			add("daemon-version", "pass", fmt.Sprintf("daemon and CLI both on %s", version))
+		} else {
+			add("daemon-version", "warn", fmt.Sprintf(
+				"daemon is running %s but this CLI is %s; the daemon serves most commands, so it is still running the old code — restart it (%s) to pick up this version",
+				health.Version, version, platform.RestartHint()))
+		}
 	}
 
 	document, registryErr := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)

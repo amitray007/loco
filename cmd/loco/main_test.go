@@ -105,13 +105,23 @@ func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	// --config-dir does not redirect the service-unit paths: those derive from $HOME, so
+	// without this the test reads the developer's real ~/Library/LaunchAgents and asserts
+	// "warn" (plist not installed) against it. That passes only on a machine where loco
+	// is not installed — it fails for anyone who actually runs what they are developing.
+	// Point the unit dir at an empty dir so "not installed" is a fact about the fixture.
+	unitDir := t.TempDir()
+	t.Setenv("LOCO_LAUNCH_AGENTS_DIR", unitDir) // macOS
+	t.Setenv("LOCO_SYSTEMD_UNIT_DIR", unitDir)  // Linux
 	p, err := paths.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- daemon.Run(ctx, p, "doctor-test") }()
+	// Run the daemon at the CLI's own version: this test asserts the healthy spine, and
+	// a version mismatch is now a (correct) warning of its own, covered separately.
+	go func() { done <- daemon.Run(ctx, p, version) }()
 	waitForDaemon(t, p.Socket)
 	t.Cleanup(func() {
 		cancel()
@@ -127,16 +137,113 @@ func TestDoctorReportsHealthySpineAndLaunchdWarnings(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
 	}
-	if !report.Healthy || len(report.Checks) != 7 {
+	if !report.Healthy || len(report.Checks) != 8 {
 		t.Fatalf("report = %+v", report)
 	}
 	want := map[string]string{
-		"runtime-paths": "pass", "daemon-rpc": "pass", "registry": "pass",
+		"runtime-paths": "pass", "daemon-rpc": "pass", "daemon-version": "pass", "registry": "pass",
 		"durable-stores": "pass", "disk-usage": "pass", "service-unit": "warn", "watchdog-unit": "warn",
 	}
 	for _, check := range report.Checks {
 		if check.Status != want[check.Name] {
 			t.Errorf("check %s status = %q, want %q", check.Name, check.Status, want[check.Name])
+		}
+	}
+}
+
+// #19: `loco events ack` is served by the long-lived daemon, not by the CLI binary, so
+// upgrading loco leaves the OLD code running until launchd restarts it. That is how #19's
+// reporter saw v0.1.2's strict ack silently not fire: their daemon predated the upgrade.
+// The skew is invisible — every command keeps working, just with the old logic — so the
+// one place that answers "is my install sane?" has to say it out loud.
+func TestDoctorFlagsDaemonBinarySkew(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-skew-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	unitDir := t.TempDir()
+	t.Setenv("LOCO_LAUNCH_AGENTS_DIR", unitDir)
+	t.Setenv("LOCO_SYSTEMD_UNIT_DIR", unitDir)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	// The daemon runs a version the CLI does not: exactly the post-upgrade state.
+	go func() { done <- daemon.Run(ctx, p, "0.0.1-stale") }()
+	waitForDaemon(t, p.Socket)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	var stdout, stderr bytes.Buffer
+	// Skew warns rather than fails: `loco doctor` treats warn as non-fatal (an
+	// uninstalled plist warns too), and running a dev binary against an installed
+	// daemon is a normal thing to do. The check has to be visible, not fatal.
+	if code := run([]string{"--config-dir", root, "doctor", "--json"}, &stdout, &stderr); code != 0 {
+		t.Errorf("doctor exit = %d on a skewed daemon, want 0 (skew warns, it does not fail)", code)
+	}
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
+	}
+	var check *doctorCheck
+	for i := range report.Checks {
+		if report.Checks[i].Name == "daemon-version" {
+			check = &report.Checks[i]
+		}
+	}
+	if check == nil {
+		t.Fatalf("no daemon-version check in report: %+v", report)
+	}
+	if check.Status != "warn" {
+		t.Errorf("daemon-version status = %q, want %q", check.Status, "warn")
+	}
+	// The detail has to name both versions and say what to do; "skew detected" alone
+	// leaves the reader exactly where #19's reporter was.
+	for _, want := range []string{"0.0.1-stale", version, "restart"} {
+		if !strings.Contains(check.Detail, want) {
+			t.Errorf("detail %q omits %q", check.Detail, want)
+		}
+	}
+}
+
+// The skew check must stay quiet when the daemon matches, or it becomes noise that
+// trains the reader to ignore the one case that matters.
+func TestDoctorPassesWhenDaemonVersionMatches(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-noskew-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	unitDir := t.TempDir()
+	t.Setenv("LOCO_LAUNCH_AGENTS_DIR", unitDir)
+	t.Setenv("LOCO_SYSTEMD_UNIT_DIR", unitDir)
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, version) }()
+	waitForDaemon(t, p.Socket)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"--config-dir", root, "doctor", "--json"}, &stdout, &stderr)
+	var report doctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
+	}
+	for _, check := range report.Checks {
+		if check.Name == "daemon-version" && check.Status != "pass" {
+			t.Errorf("matched versions reported %q: %s", check.Status, check.Detail)
 		}
 	}
 }
@@ -830,6 +937,86 @@ func TestGroupUsageListsEveryDispatchableVerb(t *testing.T) {
 				group, verb, want.fn)
 		}
 	}
+}
+
+// #11 recurred inside the fix for #11 (#19): `events ack` grew `--allow-skip` and
+// one of its two usage strings was updated. The arg-count guard printed the stale
+// one, so the flag was undiscoverable from the CLI's own help. The verb guard above
+// only checks group usage lines, so a flag missing from a subcommand usage line
+// sailed through. This asserts the other half: every flag a subcommand registers
+// appears in every usage string that subcommand prints.
+func TestSubcommandUsageStringsListEveryFlag(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// --json is registered on nearly every subcommand and is genuinely optional
+	// noise in a usage line; the class of bug being guarded is a *behavioural*
+	// flag going undocumented, which is what --allow-skip was.
+	exempt := map[string]bool{"json": true}
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !strings.HasPrefix(fn.Name.Name, "run") {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			clause, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			verb := ""
+			for _, expr := range clause.List {
+				if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if v, err := strconv.Unquote(lit.Value); err == nil {
+						verb = v
+					}
+				}
+			}
+			flags, usages := flagsAndUsagesIn(clause)
+			for _, flagName := range flags {
+				if exempt[flagName] {
+					continue
+				}
+				for _, usage := range usages {
+					if !strings.Contains(usage, "--"+flagName) {
+						t.Errorf("%s (case %q): registers --%s but usage string %q omits it;\n"+
+							"  a flag absent from the usage the CLI actually prints is undiscoverable (#11/#19)",
+							fn.Name.Name, verb, flagName, usage)
+					}
+				}
+			}
+			return true
+		})
+	}
+}
+
+// flagsAndUsagesIn returns the flag names registered via flags.String/Bool/Int/
+// Duration inside a case clause, and every "usage: ..." string literal it prints.
+func flagsAndUsagesIn(clause *ast.CaseClause) (flags []string, usages []string) {
+	ast.Inspect(clause, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) > 0 {
+				switch sel.Sel.Name {
+				case "String", "Bool", "Int", "Int64", "Duration", "Uint", "Uint64", "Float64":
+					if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						if name, err := strconv.Unquote(lit.Value); err == nil && name != "" {
+							flags = append(flags, name)
+						}
+					}
+				}
+			}
+		}
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if s, err := strconv.Unquote(lit.Value); err == nil && strings.HasPrefix(s, "usage: ") {
+				usages = append(usages, s)
+			}
+		}
+		return true
+	})
+	return flags, usages
 }
 
 // switchCaseVerbs returns every string literal appearing in a case clause of

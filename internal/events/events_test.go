@@ -412,8 +412,41 @@ func TestStrictAckDoesNotFireOnACursorWithNoReadHistory(t *testing.T) {
 	if err := store.saveCursor(cursor); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Ack("legacy", "old", "e2", false); err != nil {
+	result, err := store.Ack("legacy", "old", "e2", false)
+	if err != nil {
 		t.Fatalf("strict ack blocked a cursor with no recorded read history: %v", err)
+	}
+	// Failing open is defensible; failing open *silently* is the failure mode #7 exists to
+	// kill. A consumer that upgraded and believes strict now covers it must be told this
+	// ack was not enforced, or the compat path is indistinguishable from a clean success.
+	if !result.StrictNotEnforced {
+		t.Error("a legacy cursor skipped unread events with strict on and reported nothing (#19)")
+	}
+	if result.SkippedUnread != 2 {
+		t.Errorf("SkippedUnread = %d, want 2", result.SkippedUnread)
+	}
+}
+
+// The compat signal must mark only the unenforced case. If it fired on a normal ack it
+// would be noise, and a warning that cries wolf gets filtered out — the same way the
+// silent path it replaces gets ignored.
+func TestStrictNotEnforcedOnlyMarksTheCompatPath(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2"} {
+		if _, err := store.Emit(EmitInput{Topic: "clean", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("clean", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	// Read everything, ack everything: enforced, nothing skipped.
+	result, err := store.Ack("clean", "consumer", "e2", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StrictNotEnforced {
+		t.Error("a fully-read ack was marked strict-not-enforced")
 	}
 }
 
