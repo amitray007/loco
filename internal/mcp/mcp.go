@@ -329,8 +329,10 @@ func toolDefinitions() []tool {
 			},
 		},
 		{
-			Name:        "loco_events_read",
-			Description: "Read unread events from a topic for a named cursor, without advancing the cursor.",
+			Name: "loco_events_read",
+			Description: "Read unread events from a topic for a named cursor, without advancing the cursor. " +
+				"Creates the cursor if it does not exist; a live cursor pins its unacked events from " +
+				"compaction, so use loco_events_peek for inspection you do not intend to ack.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -339,6 +341,19 @@ func toolDefinitions() []tool {
 					"limit":  map[string]any{"type": "integer", "description": "Maximum number of events to return (default 100)"},
 				},
 				"required": []string{"topic", "cursor"},
+			},
+		},
+		{
+			Name:        "loco_events_peek",
+			Description: "Inspect recent events on a topic without creating or advancing a cursor.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"topic":    map[string]any{"type": "string", "description": "Event topic name"},
+					"tail":     map[string]any{"type": "integer", "description": "Most recent events to show (default 20)"},
+					"from_seq": map[string]any{"type": "integer", "description": "Show events with seq >= S (oldest-first) instead of the tail"},
+				},
+				"required": []string{"topic"},
 			},
 		},
 		{
@@ -440,6 +455,29 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 			limit = *args.Limit
 		}
 		return daemon.EventsRead(ctx, s.socket, callTimeout, args.Topic, args.Cursor, limit)
+
+	case "loco_events_peek":
+		var args struct {
+			Topic   string  `json:"topic"`
+			Tail    *int    `json:"tail"`
+			FromSeq *uint64 `json:"from_seq"`
+		}
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+		if args.Topic == "" {
+			return nil, fmt.Errorf("topic is required")
+		}
+		// Defaults mirror `loco events peek`: tail 20, from-seq 0 (unset).
+		tail := 20
+		if args.Tail != nil {
+			tail = *args.Tail
+		}
+		var fromSeq uint64
+		if args.FromSeq != nil {
+			fromSeq = *args.FromSeq
+		}
+		return daemon.EventsPeek(ctx, s.socket, callTimeout, args.Topic, tail, fromSeq)
 
 	case "loco_events_ack":
 		var args struct {
