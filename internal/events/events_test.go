@@ -493,6 +493,41 @@ func TestAckIDsStillRefusesUnreadEvents(t *testing.T) {
 	}
 }
 
+// A retrying consumer re-sends ids it already acked, and a careless one repeats an id
+// within a single call. Neither is an error: the consumer is describing what it
+// processed, not issuing a diff, and making it track what loco already consumed would
+// hand back the bookkeeping this whole feature exists to take away.
+func TestAckIDsToleratesDuplicateAndAlreadyAckedIDs(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3", "e4"} {
+		if _, err := store.Emit(EmitInput{Topic: "retry", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("retry", "consumer", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AckIDs("retry", "consumer", []string{"e1", "e2"}, false); err != nil {
+		t.Fatal(err)
+	}
+	// e1 is already consumed and e3 is repeated: the run must still reach e3.
+	result, err := store.AckIDs("retry", "consumer", []string{"e1", "e3", "e3"}, false)
+	if err != nil {
+		t.Fatalf("re-acking a consumed id errored: %v", err)
+	}
+	if result.ThroughSeq != 3 || result.AckedCount != 1 {
+		t.Errorf("result = %+v, want watermark seq 3 consuming 1 (only e3 was new)", result)
+	}
+	// Re-acking at the watermark consumes nothing and says so, as --through does.
+	again, err := store.AckIDs("retry", "consumer", []string{"e3"}, false)
+	if err != nil {
+		t.Fatalf("idempotent re-ack errored: %v", err)
+	}
+	if again.Changed || again.AckedCount != 0 {
+		t.Errorf("re-ack at the watermark reported %+v, want no change", again)
+	}
+}
+
 // An unknown id is a caller error and must name the id, exactly as --through does.
 func TestAckIDsRejectsUnknownID(t *testing.T) {
 	store := testStore(t)
