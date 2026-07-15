@@ -1188,6 +1188,22 @@ func runDoctor(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		add("daemon-rpc", "pass", fmt.Sprintf("pid %d, uptime %s, version %s", health.PID, formatUptime(health.UptimeSeconds), health.Version))
 	}
 
+	// Upgrading the binary does not replace the running daemon, and nearly every command
+	// is served by the daemon rather than by the CLI you just installed. So a fixed bug
+	// stays broken until launchd restarts it, with no symptom saying why: the fix is on
+	// disk, the old code is in memory, and every command still works. That is #19 — v0.1.2's
+	// strict ack silently not firing because the daemon predated the upgrade. Nothing else
+	// compares the two versions, so doctor is the only place this can surface.
+	if healthErr == nil {
+		if health.Version == version {
+			add("daemon-version", "pass", fmt.Sprintf("daemon and CLI both on %s", version))
+		} else {
+			add("daemon-version", "warn", fmt.Sprintf(
+				"daemon is running %s but this CLI is %s; the daemon serves most commands, so it is still running the old code — restart it (%s) to pick up this version",
+				health.Version, version, platform.RestartHint()))
+		}
+	}
+
 	document, registryErr := daemon.RegistryList(context.Background(), p.Socket, 2*time.Second)
 	if registryErr != nil {
 		add("registry", "fail", registryErr.Error())

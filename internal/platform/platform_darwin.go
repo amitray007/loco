@@ -29,3 +29,10 @@ func (launchdManager) Uninstall(ctx context.Context, p paths.Paths) (bool, error
 
 // Manager returns the macOS launchd service manager.
 func Manager() ServiceManager { return launchdManager{} }
+
+// RestartHint returns the command that restarts the daemon on this OS. `loco daemon`
+// has no restart verb — the service is launchd-managed — so a reader told only to
+// "restart the daemon" has to go find this out.
+func RestartHint() string {
+	return "launchctl kickstart -k gui/$(id -u)/" + paths.Label
+}
