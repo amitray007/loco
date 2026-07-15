@@ -14,7 +14,7 @@ func ServiceList(ctx context.Context, socket string, timeout time.Duration) (ser
 	if err != nil {
 		return service.ListResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("service.list\n")); err != nil {
 		return service.ListResult{}, fmt.Errorf("request service list: %w", err)
 	}
@@ -37,7 +37,7 @@ func ServiceControl(ctx context.Context, socket string, timeout time.Duration, n
 	if err != nil {
 		return service.ControlResult{}, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if _, err := conn.Write([]byte("service.control\n")); err != nil {
 		return service.ControlResult{}, fmt.Errorf("request service control: %w", err)
 	}

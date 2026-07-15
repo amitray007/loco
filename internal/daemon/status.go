@@ -35,7 +35,7 @@ func Status(ctx context.Context, socket string, timeout time.Duration) (Health, 
 	if err != nil {
 		return Health{}, fmt.Errorf("connect to %s: %w", socket, err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	deadline := time.Now().Add(timeout)
 	if err := conn.SetDeadline(deadline); err != nil {

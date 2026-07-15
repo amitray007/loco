@@ -241,8 +241,8 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 		m.finishRecord(&record, started)
 		return
 	}
-	defer stdout.Close()
-	defer stderr.Close()
+	defer func() { _ = stdout.Close() }()
+	defer func() { _ = stderr.Close() }()
 
 	outCap := &cappedWriter{w: stdout, limit: maxJobLogBytes}
 	errCap := &cappedWriter{w: stderr, limit: maxJobLogBytes}
@@ -347,7 +347,7 @@ func (m *Manager) writeRecord(record RunRecord) {
 		return
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return

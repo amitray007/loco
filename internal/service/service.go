@@ -525,7 +525,7 @@ func (p *process) writeRecord(id string, started, finished time.Time, exitCode i
 		return
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if tmp.Chmod(0o600) != nil {
 		_ = tmp.Close()
 		return

@@ -507,7 +507,7 @@ func (s *Store) Overview() ([]TopicStatus, error) {
 				}
 			}
 			if cursor.Status == "live" && !oldest.IsZero() && now.Sub(oldest) > RetentionFloor {
-				cs.Warning = fmt.Sprintf("unacked events older than 14d")
+				cs.Warning = "unacked events older than 14d"
 			}
 			item.Cursors = append(item.Cursors, cs)
 		}
@@ -530,7 +530,7 @@ func (s *Store) RecentAlerts(since time.Time, limit int) ([]Alert, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	result := make([]Alert, 0)
 	for scanner.Scan() {
@@ -663,7 +663,7 @@ func readEventFile(path string) ([]Event, error) {
 		// content yet). Skip it only if it is genuinely last.
 		if len(bytes.TrimSpace(raw)) == 0 {
 			if scanner.Scan() || scanner.Err() != nil {
-				file.Close()
+				_ = file.Close()
 				return nil, fmt.Errorf("decode event log %s: unexpected blank line", path)
 			}
 			torn = true
@@ -674,7 +674,7 @@ func readEventFile(path string) ([]Event, error) {
 			// Only the final line may be torn. If more data follows, this is
 			// corruption in the middle of the log — refuse to guess.
 			if scanner.Scan() || scanner.Err() != nil {
-				file.Close()
+				_ = file.Close()
 				return nil, fmt.Errorf("decode event log %s: %w", path, perr)
 			}
 			torn = true
@@ -685,7 +685,7 @@ func readEventFile(path string) ([]Event, error) {
 		result = append(result, event)
 	}
 	scanErr := scanner.Err()
-	file.Close()
+	_ = file.Close()
 	if scanErr != nil && !torn {
 		return nil, scanErr
 	}
@@ -796,7 +796,7 @@ func (s *Store) appendAlert(alert Alert) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if _, err = file.Write(data); err != nil {
 		return err
 	}
@@ -866,7 +866,7 @@ func writeBytesAtomic(path string, data []byte) error {
 		return err
 	}
 	name := tmp.Name()
-	defer os.Remove(name)
+	defer func() { _ = os.Remove(name) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return err
