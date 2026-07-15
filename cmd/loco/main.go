@@ -928,25 +928,35 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		flags.SetOutput(stderr)
 		cursor := flags.String("cursor", "", "consumer cursor")
 		through := flags.String("through", "", "event ID")
+		allowSkip := flags.Bool("allow-skip", false, "consume events this cursor never read instead of erroring")
 		jsonFlag := flags.Bool("json", false, "emit JSON")
 		if err := flags.Parse(args[2:]); err != nil {
 			return 1
 		}
 		if flags.NArg() != 0 || *cursor == "" || *through == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
 			return 1
 		}
-		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through)
+		result, err := daemon.EventsAck(context.Background(), p.Socket, 5*time.Second, topic, *cursor, *through, *allowSkip)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "ack events: %v\n", err)
 			return 2
 		}
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
-		} else if result.Changed {
-			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+			return 0
+		}
+		// Report the blast radius even when nothing was skipped: `ack --through ID`
+		// reads like one message but consumes everything below it, and the count is
+		// the only thing at the call site that shows it.
+		if result.Changed {
+			_, _ = fmt.Fprintf(stdout, "cursor %s advanced through %s (seq %d), consuming %d event(s)\n",
+				result.Cursor, result.ThroughID, result.ThroughSeq, result.AckedCount)
 		} else {
 			_, _ = fmt.Fprintf(stdout, "cursor %s already at or past %s (seq %d)\n", result.Cursor, result.ThroughID, result.ThroughSeq)
+		}
+		if result.SkippedUnread > 0 {
+			_, _ = fmt.Fprintf(stderr, "warning: %d of those event(s) were never returned by a read on this cursor\n", result.SkippedUnread)
 		}
 		return 0
 	case "list":

@@ -63,6 +63,12 @@ type AckResult struct {
 	ThroughID     string `json:"through_id"`
 	ThroughSeq    uint64 `json:"through_seq"`
 	Changed       bool   `json:"changed"`
+	// AckedCount is how many events this ack consumed — the blast radius. Reported
+	// whether or not the ack skipped anything, so a log makes a post-mortem possible.
+	AckedCount int `json:"acked_count"`
+	// SkippedUnread is how many of those were never returned by a read on this cursor.
+	// Non-zero means the ack consumed events the consumer cannot have processed.
+	SkippedUnread int `json:"skipped_unread"`
 }
 type CompactResult struct {
 	SchemaVersion  int      `json:"schema_version"`
@@ -103,9 +109,15 @@ type Cursor struct {
 	LastAckedSeq  uint64 `json:"last_acked_seq"`
 	CreatedAt     string `json:"created_at"`
 	LastReadAt    string `json:"last_read_at,omitempty"`
-	LastAckAt     string `json:"last_ack_at,omitempty"`
-	Status        string `json:"status"`
-	RetiredAt     string `json:"retired_at,omitempty"`
+	// LastReadSeq is the highest seq this cursor has ever been handed by a read. Ack
+	// compares against it to tell "the consumer processed these and is acking them"
+	// from "the consumer is acking past events it never saw". Absent on cursors written
+	// before this field existed, which decodes to 0 — strict then cannot fire on them,
+	// which is the right default: loco does not know what they read.
+	LastReadSeq uint64 `json:"last_read_seq,omitempty"`
+	LastAckAt   string `json:"last_ack_at,omitempty"`
+	Status      string `json:"status"`
+	RetiredAt   string `json:"retired_at,omitempty"`
 }
 type Alert struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -241,9 +253,6 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 		cursor = Cursor{SchemaVersion: SchemaVersion, Topic: topic, Name: cursorName, LastAckedSeq: last, CreatedAt: now, Status: "live"}
 	}
 	cursor.LastReadAt, cursor.Status, cursor.RetiredAt = now, "live", ""
-	if err := s.saveCursor(cursor); err != nil {
-		return ReadResult{}, err
-	}
 	result := ReadResult{SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName, Events: make([]Event, 0)}
 	for _, event := range all {
 		if len(result.Events) >= limit {
@@ -252,6 +261,19 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 		if event.Seq > cursor.LastAckedSeq {
 			result.Events = append(result.Events, event)
 		}
+	}
+	// Record how far this consumer has actually been shown, so an ack can tell a
+	// processed batch from a watermark sweeping past events nobody read. The cursor is
+	// saved after the batch is chosen, not before: the mark must describe what is being
+	// handed over. Reads still never advance LastAckedSeq — this is not a read receipt,
+	// only a bound on what the consumer could possibly have processed.
+	if len(result.Events) > 0 {
+		if high := result.Events[len(result.Events)-1].Seq; high > cursor.LastReadSeq {
+			cursor.LastReadSeq = high
+		}
+	}
+	if err := s.saveCursor(cursor); err != nil {
+		return ReadResult{}, err
 	}
 	return result, nil
 }
@@ -300,7 +322,20 @@ func (s *Store) Peek(topic string, tail int, fromSeq uint64) (ReadResult, error)
 	return result, nil
 }
 
-func (s *Store) Ack(topic, cursorName, throughID string) (AckResult, error) {
+// ErrAckSkipsUnread is returned when a strict ack would consume events the cursor was
+// never handed by a read. Callers that mean it pass allowSkip.
+var ErrAckSkipsUnread = errors.New("ack would consume events that were never read")
+
+// Ack advances a cursor's watermark to throughID's seq, consuming every event at or
+// below it.
+//
+// allowSkip=false (strict) refuses an ack that would consume events this cursor has
+// never been handed by a read. `ack --through ID` reads like "ack this event"; it means
+// "ack this event and everything before it, read or not". A consumer that drains 5,
+// fails on the 3rd, and acks the batch's last id — the natural thing to write — silently
+// consumes the failure. At-least-once delivery then quietly depends on every consumer
+// knowing to ack the highest CONTIGUOUSLY-succeeded id. That invariant belongs here.
+func (s *Store) Ack(topic, cursorName, throughID string, allowSkip bool) (AckResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := validateComponent("topic", topic); err != nil {
@@ -309,7 +344,7 @@ func (s *Store) Ack(topic, cursorName, throughID string) (AckResult, error) {
 	if err := validateComponent("cursor", cursorName); err != nil {
 		return AckResult{}, err
 	}
-	meta, _, err := s.loadTopic(topic)
+	meta, all, err := s.loadTopic(topic)
 	if err != nil {
 		return AckResult{}, err
 	}
@@ -325,6 +360,36 @@ func (s *Store) Ack(topic, cursorName, throughID string) (AckResult, error) {
 		return AckResult{}, fmt.Errorf("cursor %q does not exist; read the topic first", cursorName)
 	}
 	changed := seq > cursor.LastAckedSeq
+
+	// Blast radius: how many events this ack consumes, and how many of those the
+	// consumer was never shown. Counting actual events rather than differencing seqs
+	// keeps both honest across a compacted topic, where seqs are sparse.
+	ackedCount, skippedUnread := 0, 0
+	if changed {
+		for _, event := range all {
+			if event.Seq > cursor.LastAckedSeq && event.Seq <= seq {
+				ackedCount++
+				if event.Seq > cursor.LastReadSeq {
+					skippedUnread++
+				}
+			}
+		}
+	}
+	// A cursor with no recorded read history predates LastReadSeq: it was written before
+	// the field existed, so 0 means "unknown", not "read nothing". Enforcing strict
+	// against it would reject every existing consumer's first ack after an upgrade —
+	// a louder failure than the silent one being fixed, and on data loco cannot judge.
+	// The count is still reported; only the refusal is withheld.
+	unknownReadHistory := cursor.LastReadSeq == 0
+	if skippedUnread > 0 && !allowSkip && !unknownReadHistory {
+		return AckResult{
+				SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName,
+				ThroughID: throughID, ThroughSeq: seq, Changed: false,
+				AckedCount: ackedCount, SkippedUnread: skippedUnread,
+			}, fmt.Errorf("%w: %d of %d events through %q (seq %d) were never returned by a read on cursor %q; ack the highest contiguously-processed id, or pass allow-skip to consume them anyway",
+				ErrAckSkipsUnread, skippedUnread, ackedCount, throughID, seq, cursorName)
+	}
+
 	if changed {
 		cursor.LastAckedSeq = seq
 	}
@@ -332,7 +397,11 @@ func (s *Store) Ack(topic, cursorName, throughID string) (AckResult, error) {
 	if err := s.saveCursor(cursor); err != nil {
 		return AckResult{}, err
 	}
-	return AckResult{SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName, ThroughID: throughID, ThroughSeq: seq, Changed: changed}, nil
+	return AckResult{
+		SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName,
+		ThroughID: throughID, ThroughSeq: seq, Changed: changed,
+		AckedCount: ackedCount, SkippedUnread: skippedUnread,
+	}, nil
 }
 
 func (s *Store) Compact(topic string) (CompactResult, error) {

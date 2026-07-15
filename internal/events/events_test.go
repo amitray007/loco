@@ -3,6 +3,7 @@ package events
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func TestEmitReadAckAndDedupe(t *testing.T) {
 	if len(again.Events) != 1 {
 		t.Fatal("read advanced cursor without ack")
 	}
-	ack, err := store.Ack("demo.topic", "c1", "same-id")
+	ack, err := store.Ack("demo.topic", "c1", "same-id", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestCompactionWaitsForEveryLiveCursorAndPreservesWatermark(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.Ack("compact", "c1", "old"); err != nil {
+	if _, err := store.Ack("compact", "c1", "old", false); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(15 * 24 * time.Hour)
@@ -104,7 +105,7 @@ func TestCompactionWaitsForEveryLiveCursorAndPreservesWatermark(t *testing.T) {
 	if result.Removed != 0 {
 		t.Fatalf("removed with live unacked cursor: %+v", result)
 	}
-	if _, err := store.Ack("compact", "c2", "old"); err != nil {
+	if _, err := store.Ack("compact", "c2", "old", false); err != nil {
 		t.Fatal(err)
 	}
 	result, err = store.Compact("compact")
@@ -188,7 +189,7 @@ func TestValidationAndAckRequiresRead(t *testing.T) {
 	if _, err := store.Emit(EmitInput{Topic: "good", ID: "x", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Ack("good", "missing", "x"); err == nil {
+	if _, err := store.Ack("good", "missing", "x", false); err == nil {
 		t.Fatal("ack created a cursor")
 	}
 }
@@ -207,7 +208,7 @@ func TestLimitAndAckThroughMiddleSequence(t *testing.T) {
 	if len(read.Events) != 2 || read.Events[1].ID != "two" {
 		t.Fatalf("limited read=%+v", read)
 	}
-	if _, err := store.Ack("ordered", "consumer", "two"); err != nil {
+	if _, err := store.Ack("ordered", "consumer", "two", false); err != nil {
 		t.Fatal(err)
 	}
 	remaining, err := store.Read("ordered", "consumer", 100)
@@ -302,6 +303,117 @@ func testStore(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()
 	return New(filepath.Join(root, "events"), filepath.Join(root, "alerts.jsonl"))
+}
+
+// `ack --through ID` is a watermark, not an acknowledgment of one message: it consumes
+// the id AND everything below it. The failure this prevents is the natural thing to
+// write — drain a batch, one item fails, ack the batch's LAST id — which silently
+// consumes the failure and never redelivers it. At-least-once then quietly depends on
+// every consumer knowing to ack the highest contiguously-succeeded id.
+func TestStrictAckRefusesToConsumeUnreadEvents(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "batch", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The consumer only ever saw e1.
+	read, err := store.Read("batch", "consumer", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Events) != 1 || read.Events[0].ID != "e1" {
+		t.Fatalf("read = %+v", read)
+	}
+
+	// Acking through e3 would consume e2 and e3, which this cursor was never handed.
+	result, err := store.Ack("batch", "consumer", "e3", false)
+	if !errors.Is(err, ErrAckSkipsUnread) {
+		t.Fatalf("strict ack consumed unread events: err = %v", err)
+	}
+	if result.SkippedUnread != 2 {
+		t.Errorf("SkippedUnread = %d, want 2", result.SkippedUnread)
+	}
+	if result.Changed {
+		t.Error("a refused ack reported Changed")
+	}
+	// The refusal must not have moved the watermark. All three stay deliverable: e1 was
+	// read but never acked, and a read does not consume.
+	redelivered, err := store.Read("batch", "consumer", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(redelivered.Events) != 3 {
+		t.Fatalf("after a refused ack, %d events remain, want 3 (nothing consumed)", len(redelivered.Events))
+	}
+
+	// Acking what was actually read is the normal path and must work.
+	if _, err := store.Ack("batch", "consumer", "e1", false); err != nil {
+		t.Fatalf("strict ack refused an event the consumer read: %v", err)
+	}
+}
+
+// allow-skip is the escape hatch: skipping stays possible, it just stops being the
+// silent default.
+func TestAllowSkipConsumesUnreadEventsAndReportsIt(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2", "e3"} {
+		if _, err := store.Emit(EmitInput{Topic: "skip", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("skip", "consumer", 1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Ack("skip", "consumer", "e3", true)
+	if err != nil {
+		t.Fatalf("allow-skip ack failed: %v", err)
+	}
+	if !result.Changed || result.ThroughSeq != 3 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.AckedCount != 3 {
+		t.Errorf("AckedCount = %d, want 3", result.AckedCount)
+	}
+	// Even when permitted, the blast radius is reported: without this there is nothing
+	// in a log to find afterwards.
+	if result.SkippedUnread != 2 {
+		t.Errorf("SkippedUnread = %d, want 2 — an override with no record is still silent", result.SkippedUnread)
+	}
+	remaining, err := store.Read("skip", "consumer", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining.Events) != 0 {
+		t.Fatalf("allow-skip did not consume: %d events remain", len(remaining.Events))
+	}
+}
+
+// A cursor written before LastReadSeq existed decodes it as 0. Strict must not fire on
+// such a cursor: loco does not know what it read, and erroring on every legacy consumer
+// would be a worse failure than the one being fixed.
+func TestStrictAckDoesNotFireOnACursorWithNoReadHistory(t *testing.T) {
+	store := testStore(t)
+	for _, id := range []string{"e1", "e2"} {
+		if _, err := store.Emit(EmitInput{Topic: "legacy", ID: id, Payload: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Read("legacy", "old", 100); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pre-upgrade cursor: read history unknown, watermark at the start.
+	cursor, _, err := store.loadCursor("legacy", "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor.LastReadSeq = 0
+	if err := store.saveCursor(cursor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Ack("legacy", "old", "e2", false); err != nil {
+		t.Fatalf("strict ack blocked a cursor with no recorded read history: %v", err)
+	}
 }
 
 // --- Regression tests for adversarial findings (fix/adversarial-findings) ---
@@ -434,7 +546,7 @@ func TestCompactPrunesIDMap(t *testing.T) {
 	}
 	// A cursor that acks everything so events become eligible for compaction.
 	store.Read("t", "c", 100)
-	store.Ack("t", "c", "old2")
+	store.Ack("t", "c", "old2", false)
 	store.now = func() time.Time { return base.Add(30 * 24 * time.Hour) }
 	res, err := store.Compact("t")
 	if err != nil {

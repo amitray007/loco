@@ -342,14 +342,18 @@ func toolDefinitions() []tool {
 			},
 		},
 		{
-			Name:        "loco_events_ack",
-			Description: "Advance a topic's cursor through the given event ID, marking prior events consumed.",
+			Name: "loco_events_ack",
+			Description: "Advance a topic's cursor through the given event ID, consuming it AND every event before it. " +
+				"This is a watermark, not an acknowledgment of one message: if you processed a batch and one item " +
+				"failed, ack the highest contiguously-succeeded id, not the batch's last id. Acking past an event " +
+				"you never read is refused unless allow_skip is set.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"topic":   map[string]any{"type": "string", "description": "Event topic name"},
-					"cursor":  map[string]any{"type": "string", "description": "Consumer cursor name"},
-					"through": map[string]any{"type": "string", "description": "Event ID to acknowledge through"},
+					"topic":      map[string]any{"type": "string", "description": "Event topic name"},
+					"cursor":     map[string]any{"type": "string", "description": "Consumer cursor name"},
+					"through":    map[string]any{"type": "string", "description": "Event ID to acknowledge through; everything at or below it is consumed"},
+					"allow_skip": map[string]any{"type": "boolean", "description": "Consume events this cursor never read instead of erroring (default false)"},
 				},
 				"required": []string{"topic", "cursor", "through"},
 			},
@@ -443,9 +447,10 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 
 	case "loco_events_ack":
 		var args struct {
-			Topic   string `json:"topic"`
-			Cursor  string `json:"cursor"`
-			Through string `json:"through"`
+			Topic     string `json:"topic"`
+			Cursor    string `json:"cursor"`
+			Through   string `json:"through"`
+			AllowSkip bool   `json:"allow_skip"`
 		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -453,7 +458,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if args.Topic == "" || args.Cursor == "" || args.Through == "" {
 			return nil, fmt.Errorf("topic, cursor, and through are required")
 		}
-		return daemon.EventsAck(ctx, s.socket, callTimeout, args.Topic, args.Cursor, args.Through)
+		return daemon.EventsAck(ctx, s.socket, callTimeout, args.Topic, args.Cursor, args.Through, args.AllowSkip)
 
 	case "loco_cron_list":
 		document, err := daemon.RegistryList(ctx, s.socket, callTimeout)
