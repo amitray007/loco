@@ -832,6 +832,86 @@ func TestGroupUsageListsEveryDispatchableVerb(t *testing.T) {
 	}
 }
 
+// #11 recurred inside the fix for #11 (#19): `events ack` grew `--allow-skip` and
+// one of its two usage strings was updated. The arg-count guard printed the stale
+// one, so the flag was undiscoverable from the CLI's own help. The verb guard above
+// only checks group usage lines, so a flag missing from a subcommand usage line
+// sailed through. This asserts the other half: every flag a subcommand registers
+// appears in every usage string that subcommand prints.
+func TestSubcommandUsageStringsListEveryFlag(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	// --json is registered on nearly every subcommand and is genuinely optional
+	// noise in a usage line; the class of bug being guarded is a *behavioural*
+	// flag going undocumented, which is what --allow-skip was.
+	exempt := map[string]bool{"json": true}
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !strings.HasPrefix(fn.Name.Name, "run") {
+			continue
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			clause, ok := n.(*ast.CaseClause)
+			if !ok {
+				return true
+			}
+			verb := ""
+			for _, expr := range clause.List {
+				if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if v, err := strconv.Unquote(lit.Value); err == nil {
+						verb = v
+					}
+				}
+			}
+			flags, usages := flagsAndUsagesIn(clause)
+			for _, flagName := range flags {
+				if exempt[flagName] {
+					continue
+				}
+				for _, usage := range usages {
+					if !strings.Contains(usage, "--"+flagName) {
+						t.Errorf("%s (case %q): registers --%s but usage string %q omits it;\n"+
+							"  a flag absent from the usage the CLI actually prints is undiscoverable (#11/#19)",
+							fn.Name.Name, verb, flagName, usage)
+					}
+				}
+			}
+			return true
+		})
+	}
+}
+
+// flagsAndUsagesIn returns the flag names registered via flags.String/Bool/Int/
+// Duration inside a case clause, and every "usage: ..." string literal it prints.
+func flagsAndUsagesIn(clause *ast.CaseClause) (flags []string, usages []string) {
+	ast.Inspect(clause, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) > 0 {
+				switch sel.Sel.Name {
+				case "String", "Bool", "Int", "Int64", "Duration", "Uint", "Uint64", "Float64":
+					if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						if name, err := strconv.Unquote(lit.Value); err == nil && name != "" {
+							flags = append(flags, name)
+						}
+					}
+				}
+			}
+		}
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			if s, err := strconv.Unquote(lit.Value); err == nil && strings.HasPrefix(s, "usage: ") {
+				usages = append(usages, s)
+			}
+		}
+		return true
+	})
+	return flags, usages
+}
+
 // switchCaseVerbs returns every string literal appearing in a case clause of
 // the top-level switch inside the named function, e.g. `case "pause", "resume":`
 // yields both verbs. Help arms are skipped: they are routing, not verbs.

@@ -472,7 +472,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco cron add NAME --schedule CRON --cmd COMMAND [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--timeout D] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -754,7 +754,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 	switch args[0] {
 	case "add":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--backoff-initial D] [--backoff-max D] [--json]")
 			return 1
 		}
 		name := args[1]
@@ -774,7 +774,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			return 1
 		}
 		if flags.NArg() != 0 || *command == "" {
-			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco svc add NAME --cmd COMMAND [--restart POLICY] [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--backoff-initial D] [--backoff-max D] [--json]")
 			return 1
 		}
 		env, envErr := parseEnvPairs(envPairs)
@@ -929,7 +929,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "read":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--wait [--timeout D]] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -1002,7 +1002,7 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		return 0
 	case "ack":
 		if len(args) < 2 {
-			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--json]")
+			_, _ = fmt.Fprintln(stderr, "usage: loco events ack TOPIC --cursor NAME --through ID [--allow-skip] [--json]")
 			return 1
 		}
 		topic := args[1]
@@ -1039,6 +1039,10 @@ func runEvents(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.
 		}
 		if result.SkippedUnread > 0 {
 			_, _ = fmt.Fprintf(stderr, "warning: %d of those event(s) were never returned by a read on this cursor\n", result.SkippedUnread)
+		}
+		if result.StrictNotEnforced {
+			_, _ = fmt.Fprintf(stderr, "warning: cursor %s predates read tracking; strict ack was not enforced. "+
+				"Recreate the cursor to get strict protection on future acks.\n", result.Cursor)
 		}
 		return 0
 	case "list":
