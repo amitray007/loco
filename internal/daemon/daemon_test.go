@@ -14,6 +14,37 @@ import (
 	"github.com/amitray007/loco/internal/registry"
 )
 
+// The passthrough warning is computed here rather than in the CLI on purpose. childEnv
+// resolves passthrough vars against the DAEMON's environment, and the daemon inherits
+// launchd's/systemd's environment as of when it was loaded — not the user's shell. So a
+// var exported in a shell profile after `loco daemon install` is present for the user
+// and absent for jobs. A CLI-side check would inspect the wrong process and stay silent
+// for exactly that case, which is the one the issue describes.
+func TestMissingPassthroughWarningsCheckThisProcessNotTheCallers(t *testing.T) {
+	t.Setenv("LOCO_TEST_PRESENT", "value")
+
+	warnings := missingPassthroughWarnings([]string{"LOCO_TEST_PRESENT"})
+	if len(warnings) != 0 {
+		t.Errorf("a var that IS in the environment warned anyway: %+v", warnings)
+	}
+
+	warnings = missingPassthroughWarnings([]string{"LOCO_TEST_ABSENT_XYZ"})
+	if len(warnings) != 1 {
+		t.Fatalf("an absent var produced %d warnings, want 1: %+v", len(warnings), warnings)
+	}
+	// The reason is the actionable part: without it the warning is just noise.
+	if !strings.Contains(warnings[0], "LOCO_TEST_ABSENT_XYZ") {
+		t.Errorf("warning does not name the var: %q", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "not your shell") {
+		t.Errorf("warning does not explain why a var you can see is missing here: %q", warnings[0])
+	}
+
+	if got := missingPassthroughWarnings(nil); got != nil {
+		t.Errorf("no passthrough vars produced warnings: %+v", got)
+	}
+}
+
 func TestRunServesHealthAndCleansUp(t *testing.T) {
 	p := testPaths(t)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -41,6 +41,11 @@ type PutResult struct {
 	Revision      uint64 `json:"revision"`
 	Changed       bool   `json:"changed"`
 	Job           Job    `json:"job"`
+	// Warnings are non-fatal problems with an accepted job — e.g. a passthrough var
+	// that is not in the daemon's environment and will be unset at spawn. The job is
+	// still stored; these exist so the caller learns at the point of the mistake
+	// rather than from a job that quietly does nothing.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type Store struct {
@@ -49,6 +54,7 @@ type Store struct {
 	doc           Document
 	now           func() time.Time
 	specValidator SpecValidator
+	specInspector SpecInspector
 }
 
 func Open(path string) (*Store, error) {
@@ -83,6 +89,13 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 			return PutResult{}, fmt.Errorf("invalid %s spec for job %q: %w", input.Kind, input.Name, err)
 		}
 	}
+	// Warnings ride on the unchanged path too: re-running an add with a var that is
+	// still missing must say so again, or the second attempt looks like confirmation
+	// that the first one worked.
+	var warnings []string
+	if s.specInspector != nil {
+		warnings = s.specInspector(input.Kind, input.Spec)
+	}
 
 	if current, ok := s.doc.Jobs[input.Name]; ok && current.Kind == input.Kind && jsonEqual(current.Spec, input.Spec) {
 		return PutResult{
@@ -90,6 +103,7 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 			Revision:      s.doc.Revision,
 			Changed:       false,
 			Job:           cloneJob(current),
+			Warnings:      warnings,
 		}, nil
 	}
 
@@ -117,6 +131,7 @@ func (s *Store) Put(input PutInput) (PutResult, error) {
 		Revision:      next.Revision,
 		Changed:       true,
 		Job:           cloneJob(job),
+		Warnings:      warnings,
 	}, nil
 }
 
@@ -202,6 +217,21 @@ func (s *Store) SetSpecValidator(validator SpecValidator) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.specValidator = validator
+}
+
+// SpecInspector returns non-fatal warnings about an otherwise-valid spec. Like
+// SpecValidator it is injected, but it must also run in the daemon's process for a
+// second reason: the thing worth warning about — a passthrough var missing from the
+// environment jobs are spawned with — is only observable there. Checking in the CLI
+// would inspect the user's shell, which is exactly the environment that does NOT
+// apply, and would stay silent in the case that actually bites.
+type SpecInspector func(kind string, spec []byte) []string
+
+// SetSpecInspector installs the warning hook used by Put. Nil disables warnings.
+func (s *Store) SetSpecInspector(inspector SpecInspector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.specInspector = inspector
 }
 
 func load(path string) (Document, error) {

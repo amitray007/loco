@@ -114,6 +114,16 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// printPutWarnings surfaces a stored job's non-fatal warnings. They go to stderr: the
+// job WAS stored, so stdout's success line stays parseable, but a warning that only
+// appeared in --json would be invisible to the interactive user making the mistake.
+// JSON callers get them on the result itself.
+func printPutWarnings(warnings []string, stderr io.Writer) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(stderr, "warning: %s\n", warning)
+	}
+}
+
 // parseEnvPairs splits KEY=VALUE strings into a map, rejecting malformed entries.
 func parseEnvPairs(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
@@ -348,6 +358,7 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			_, _ = fmt.Fprintf(stderr, "put registry entry: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -453,6 +464,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			_, _ = fmt.Fprintf(stderr, "add cron job: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -727,6 +739,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			_, _ = fmt.Fprintf(stderr, "add service: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {

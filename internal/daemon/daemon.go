@@ -70,6 +70,31 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 		_, err := cronjob.DecodeSpec(spec)
 		return err
 	})
+	// Warn about passthrough vars that are not in the daemon's environment: they will
+	// be silently unset when the job spawns. This must run here, not in the CLI — the
+	// CLI would inspect the user's interactive shell, which is not the environment
+	// jobs get. The daemon inherits launchd's/systemd's environment as of the moment
+	// it was loaded, so a var exported in a shell profile after `loco daemon install`
+	// is present for the user and absent here. That is the case worth catching, and
+	// checking in the CLI would stay silent for exactly it.
+	registryStore.SetSpecInspector(func(kind string, spec []byte) []string {
+		var passthrough []string
+		switch kind {
+		case "cron":
+			decoded, err := cronjob.DecodeSpec(spec)
+			if err != nil {
+				return nil // rejected by the validator; no point piling on
+			}
+			passthrough = decoded.PassthroughEnv
+		case "svc":
+			decoded, err := service.DecodeSpec(spec)
+			if err != nil {
+				return nil
+			}
+			passthrough = decoded.PassthroughEnv
+		}
+		return missingPassthroughWarnings(passthrough)
+	})
 
 	notifier := notification.New(p.NotifyState, p.Alerts, notification.DesktopSender())
 	automaticChannel := os.Getenv("LOCO_NOTIFY_CHANNEL")
@@ -174,6 +199,25 @@ func Run(ctx context.Context, p paths.Paths, version string) error {
 			serveConnection(conn, state, started, p, registryStore, cronManager, serviceManager, eventStore, notifier)
 		}()
 	}
+}
+
+// missingPassthroughWarnings reports which passthrough vars are absent from the daemon's
+// own environment — the one jobs are spawned with. childEnv/mergedEnv skip an absent
+// var without a word, so the job runs with it unset and simply does nothing useful; the
+// mistake is worth catching where it is made rather than in a log nobody reads.
+func missingPassthroughWarnings(passthrough []string) []string {
+	var warnings []string
+	for _, key := range passthrough {
+		if _, ok := os.LookupEnv(key); !ok {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s is not in the daemon's environment and will be unset when the job runs. "+
+					"The daemon inherits the environment it was loaded with, not your shell's — "+
+					"if you exported %s after `loco daemon install`, reload the daemon "+
+					"(`loco daemon uninstall && loco daemon install`) or use `launchctl setenv %s <value>`.",
+				key, key, key))
+		}
+	}
+	return warnings
 }
 
 // maxRequestBytes caps a single RPC request body so one socket-local client cannot

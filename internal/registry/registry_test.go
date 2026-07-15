@@ -166,6 +166,57 @@ func TestLoadKeepsAnInvalidSpecRatherThanBlockingStartup(t *testing.T) {
 	}
 }
 
+// A passthrough var missing from the environment jobs are spawned with is skipped
+// without a word, so the job runs with it unset and quietly does nothing useful. The
+// warning must survive the unchanged path too: re-running an add with the var still
+// missing has to say so again, or the second attempt reads as confirmation that the
+// first one worked.
+func TestPutWarningsRideOnBothTheChangedAndUnchangedPaths(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetSpecInspector(func(kind string, spec []byte) []string {
+		if strings.Contains(string(spec), "MISSING_VAR") {
+			return []string{"MISSING_VAR is not in the daemon's environment"}
+		}
+		return nil
+	})
+
+	input := PutInput{Name: "job", Kind: "cron", Spec: json.RawMessage(`{"passthrough_env":["MISSING_VAR"]}`)}
+	first, err := store.Put(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Changed {
+		t.Fatal("first put reported unchanged")
+	}
+	if len(first.Warnings) != 1 {
+		t.Fatalf("stored job carried %d warnings, want 1: %+v", len(first.Warnings), first.Warnings)
+	}
+
+	// Identical re-put: unchanged, but the problem has not gone away.
+	second, err := store.Put(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Changed {
+		t.Fatal("re-put of an identical spec reported changed")
+	}
+	if len(second.Warnings) != 1 {
+		t.Errorf("unchanged put dropped the warning; the retry looks like it worked: %+v", second.Warnings)
+	}
+
+	// A spec with nothing to warn about must stay silent.
+	clean, err := store.Put(PutInput{Name: "clean", Kind: "cron", Spec: json.RawMessage(`{"schedule":"*/5 * * * *"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clean.Warnings) != 0 {
+		t.Errorf("clean spec warned anyway: %+v", clean.Warnings)
+	}
+}
+
 // Delete removes a job and is idempotent.
 func TestDeleteRemovesJobAndIsIdempotent(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "registry.json"))
