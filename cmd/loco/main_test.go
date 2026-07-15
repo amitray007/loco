@@ -19,6 +19,7 @@ import (
 	"github.com/amitray007/loco/internal/events"
 	"github.com/amitray007/loco/internal/notification"
 	"github.com/amitray007/loco/internal/paths"
+	"github.com/amitray007/loco/internal/registry"
 	"github.com/amitray007/loco/internal/service"
 	watchdogpkg "github.com/amitray007/loco/internal/watchdog"
 )
@@ -442,6 +443,85 @@ func TestEventsPersistAcrossDaemonRestartAndRequireExplicitAck(t *testing.T) {
 	}
 	if duplicate.Emitted || duplicate.Event.Seq != 1 {
 		t.Fatalf("duplicate=%+v", duplicate)
+	}
+}
+
+// A job whose spec cannot be scheduled must say so in both views. Reload skips such a
+// job silently and forever; `cron list` discarded its decode error and printed the
+// zero-value spec (blank columns), and `status` hardcoded every cron job's state to
+// "scheduled". So the two places you would look both reported a job that could never
+// run as if it were healthy.
+//
+// Prevention (rejecting the spec at Put) cannot reach a job already on disk — this is
+// what does.
+func TestInvalidCronSpecIsReportedByListAndStatus(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "loco-cli-invalid-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	p, err := paths.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Write the bad job straight to the registry: Put now rejects it, which is the
+	// point — this is the job that predates the check, or arrived some other way.
+	document := registry.Document{SchemaVersion: registry.SchemaVersion, Revision: 1, Jobs: map[string]registry.Job{
+		"badjob":  {Name: "badjob", Kind: "cron", Spec: json.RawMessage(`{"schema_version":1,"schedule":"@every 5m","command":["echo","hi"]}`)},
+		"healthy": {Name: "healthy", Kind: "cron", Spec: json.RawMessage(`{"schema_version":1,"schedule":"*/5 * * * *","command":["echo","ok"]}`)},
+	}}
+	data, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Registry, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, p, "invalid-test") }()
+	waitForDaemon(t, p.Socket)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// cron list must name the reason, not render blank columns.
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--config-dir", root, "cron", "list"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cron list code = %d, stderr = %s", code, stderr.String())
+	}
+	listing := stdout.String()
+	if !strings.Contains(listing, "invalid") || !strings.Contains(listing, "descriptors") {
+		t.Errorf("cron list does not report the bad job's reason:\n%s", listing)
+	}
+	if !strings.Contains(listing, "healthy") || !strings.Contains(listing, "*/5 * * * *") {
+		t.Errorf("cron list lost the healthy job:\n%s", listing)
+	}
+
+	// status must not call an unschedulable job "scheduled".
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--config-dir", root, "status", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("status code = %d, stderr = %s", code, stderr.String())
+	}
+	var overview daemon.Overview
+	if err := json.Unmarshal(stdout.Bytes(), &overview); err != nil {
+		t.Fatalf("invalid JSON %q: %v", stdout.String(), err)
+	}
+	states := make(map[string]daemon.JobOverview)
+	for _, job := range overview.Jobs {
+		states[job.Name] = job
+	}
+	if got := states["badjob"].State; got != "invalid" {
+		t.Errorf("badjob state = %q, want invalid", got)
+	}
+	if states["badjob"].Error == "" {
+		t.Error("badjob reports no reason; the parse error is the actionable part")
+	}
+	if got := states["healthy"].State; got != "scheduled" {
+		t.Errorf("healthy state = %q, want scheduled", got)
 	}
 }
 

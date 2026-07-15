@@ -25,10 +25,18 @@ type RunOverview struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 type JobOverview struct {
-	Name    string       `json:"name"`
-	Kind    string       `json:"kind"`
-	State   string       `json:"state"`
-	LastRun *RunOverview `json:"last_run,omitempty"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	// State is "scheduled", "paused", "invalid" (cron), or the supervisor's state (svc).
+	// It used to be hardcoded "scheduled" for every cron job, so a job that could never
+	// run reported the same state as a healthy one.
+	State string `json:"state"`
+	// Error explains a non-running state, e.g. the parse error behind "invalid".
+	Error string `json:"error,omitempty"`
+	// ConsecutiveSkips is a cron job's current overrun streak. Non-zero means firings
+	// are being dropped because the previous run is still going.
+	ConsecutiveSkips int          `json:"consecutive_skips,omitempty"`
+	LastRun          *RunOverview `json:"last_run,omitempty"`
 }
 type Overview struct {
 	SchemaVersion int                  `json:"schema_version"`
@@ -38,7 +46,7 @@ type Overview struct {
 	Alerts        []events.Alert       `json:"alerts"`
 }
 
-func buildOverview(state runtimeState, started time.Time, p paths.Paths, store *registry.Store, services *service.Manager, eventStore *events.Store) (Overview, error) {
+func buildOverview(state runtimeState, started time.Time, p paths.Paths, store *registry.Store, cron *cronjob.Manager, services *service.Manager, eventStore *events.Store) (Overview, error) {
 	result := Overview{SchemaVersion: SchemaVersion, Daemon: Health{SchemaVersion: SchemaVersion, Healthy: true, PID: state.PID, StartedAt: state.StartedAt, UptimeSeconds: int64(time.Since(started).Seconds()), Version: state.Version}, Jobs: make([]JobOverview, 0), Topics: make([]events.TopicStatus, 0), Alerts: make([]events.Alert, 0)}
 	serviceStates := make(map[string]string)
 	for _, item := range services.List().Services {
@@ -53,17 +61,35 @@ func buildOverview(state runtimeState, started time.Time, p paths.Paths, store *
 	for _, name := range names {
 		job := doc.Jobs[name]
 		state := "scheduled"
+		stateError := ""
+		skips := 0
 		if job.Kind == "svc" {
 			state = serviceStates[name]
 			if state == "" {
 				state = "stopped"
+			}
+		} else {
+			// A cron job's state was hardcoded "scheduled", so a job whose spec cannot
+			// be parsed — which Reload silently skips, forever — reported itself as
+			// healthy. Report what is actually true of it.
+			spec, err := cronjob.DecodeSpec(job.Spec)
+			switch {
+			case err != nil:
+				state, stateError = "invalid", err.Error()
+			case spec.Paused:
+				state = "paused"
+			default:
+				skips = cron.SkipStreak(name)
 			}
 		}
 		last, err := lastRun(p.RunsDir, name)
 		if err != nil {
 			return Overview{}, err
 		}
-		result.Jobs = append(result.Jobs, JobOverview{Name: name, Kind: job.Kind, State: state, LastRun: last})
+		result.Jobs = append(result.Jobs, JobOverview{
+			Name: name, Kind: job.Kind, State: state, Error: stateError,
+			ConsecutiveSkips: skips, LastRun: last,
+		})
 	}
 	var err error
 	result.Topics, err = eventStore.Overview()

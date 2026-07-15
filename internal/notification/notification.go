@@ -37,6 +37,12 @@ type Alert struct {
 	Message       string `json:"message"`
 	Channel       string `json:"channel"`
 	Group         string `json:"group,omitempty"`
+	// Delivered reports whether the alert reached its channel. An alert is recorded
+	// even when delivery fails, so a reader must not assume a record implies delivery.
+	// Pre-existing alerts written before this field decode as false; treat a missing
+	// DeliveryError as the signal that the alert predates the distinction.
+	Delivered     bool   `json:"delivered"`
+	DeliveryError string `json:"delivery_error,omitempty"`
 }
 type groupState struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -117,26 +123,50 @@ func (m *Manager) Send(ctx context.Context, input Input) (Result, error) {
 			}
 		}
 	}
+	// Attempt delivery, but do not return yet: the alert is recorded either way. This
+	// used to return early, which lost the durable record whenever the channel was
+	// unavailable — so a failure the caller discarded also left `loco status` nothing
+	// to show. The record is what a post-mortem reads; it must not depend on a desktop
+	// channel that may not exist (osascript on a headless or SSH session).
+	var deliveryErr error
 	if input.Channel == "desktop" {
 		if m.sender == nil {
-			return Result{}, errors.New("desktop notification sender is unavailable")
+			deliveryErr = errors.New("desktop notification sender is unavailable")
+		} else {
+			sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			deliveryErr = m.sender.Send(sendCtx, input.Title, input.Body)
+			cancel()
 		}
-		sendCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err = m.sender.Send(sendCtx, input.Title, input.Body)
-		cancel()
-		if err != nil {
-			return Result{}, err
+	}
+
+	alert := Alert{
+		SchemaVersion: SchemaVersion, ID: m.id(), Timestamp: now.Format(time.RFC3339Nano),
+		Kind: "notification", Title: input.Title, Message: input.Body,
+		Channel: input.Channel, Group: input.Group, Delivered: deliveryErr == nil,
+	}
+	if deliveryErr != nil {
+		alert.DeliveryError = deliveryErr.Error()
+	}
+	if err := appendJSONL(m.alertsPath, alert); err != nil {
+		// The record is the last line of defence; failing to write it is worth
+		// reporting even if delivery also failed. Join both so neither is hidden.
+		if deliveryErr != nil {
+			return Result{}, fmt.Errorf("deliver notification: %w (and recording it failed: %v)", deliveryErr, err)
 		}
+		return Result{}, err
+	}
+
+	// Only a delivered notification consumes the group window. Suppressing a retry
+	// because the failed attempt was *recorded* would turn the durability fix above
+	// into a new way to lose an alert.
+	if deliveryErr != nil {
+		return Result{}, deliveryErr
 	}
 	if input.Group != "" {
 		state.Groups[input.Group] = now.Format(time.RFC3339Nano)
 		if err := writeJSONAtomic(m.statePath, state); err != nil {
 			return Result{}, err
 		}
-	}
-	alert := Alert{SchemaVersion: SchemaVersion, ID: m.id(), Timestamp: now.Format(time.RFC3339Nano), Kind: "notification", Title: input.Title, Message: input.Body, Channel: input.Channel, Group: input.Group}
-	if err := appendJSONL(m.alertsPath, alert); err != nil {
-		return Result{}, err
 	}
 	return Result{SchemaVersion: SchemaVersion, Delivered: true, Group: input.Group, Timestamp: now.Format(time.RFC3339Nano)}, nil
 }

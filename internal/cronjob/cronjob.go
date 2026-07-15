@@ -106,6 +106,9 @@ type RunRecord struct {
 	StdoutPath    string `json:"stdout_path,omitempty"`
 	StderrPath    string `json:"stderr_path,omitempty"`
 	Truncated     bool   `json:"truncated,omitempty"`
+	// ConsecutiveSkips counts overruns in a row on a "skipped" record, so `loco runs`
+	// shows a wedged job as a streak rather than as unrelated one-off overlaps.
+	ConsecutiveSkips int `json:"consecutive_skips,omitempty"`
 }
 
 type Manager struct {
@@ -121,7 +124,17 @@ type Manager struct {
 	wg        sync.WaitGroup
 	sequence  atomic.Uint64
 	onFailure func(string, RunRecord)
+
+	// Consecutive overrun skips per job. A single skip is an ordinary overlap; a run
+	// of them means the job takes longer than its interval and is quietly losing
+	// firings. Reset by any run that actually starts.
+	skipMu   sync.Mutex
+	skipRuns map[string]int
 }
+
+// skipAlertThreshold is how many consecutive overruns constitute a wedged job. One
+// overlap is noise and must stay silent, or every slow-but-recovering job cries wolf.
+const skipAlertThreshold = 3
 
 func (m *Manager) SetFailureHandler(handler func(string, RunRecord)) { m.onFailure = handler }
 
@@ -130,7 +143,7 @@ func New(store *registry.Store, p paths.Paths) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		store: store, paths: p, locks: make(map[string]*sync.Mutex), ctx: ctx, cancel: cancel,
-		scheduler: cronlib.New(cronlib.WithParser(parser)),
+		scheduler: cronlib.New(cronlib.WithParser(parser)), skipRuns: make(map[string]int),
 	}
 }
 
@@ -211,13 +224,28 @@ func (m *Manager) execute(runID, name string, spec Spec, trigger string) {
 	lock := m.jobLock(name)
 	started := time.Now().UTC()
 	if !lock.TryLock() {
-		m.writeRecord(RunRecord{
+		// Dropping the firing is correct — queueing would pile work on a job that is
+		// already behind. Reporting it is what was missing: this path returns without
+		// reaching finishRecord, so the notify check there never saw a skip and a
+		// permanently-overrunning job looked healthy in `cron list` forever.
+		streak := m.recordSkip(name)
+		record := RunRecord{
 			SchemaVersion: SchemaVersion, ID: runID, Job: name, Trigger: trigger, Status: "skipped",
 			StartedAt: started.Format(time.RFC3339Nano), FinishedAt: started.Format(time.RFC3339Nano),
-			Error: "previous run is still active", ExitCode: -1,
-		})
+			Error: "previous run is still active", ExitCode: -1, ConsecutiveSkips: streak,
+		}
+		if streak >= skipAlertThreshold {
+			record.Error = fmt.Sprintf("previous run is still active (%d consecutive skips; the job is taking longer than its schedule interval)", streak)
+		}
+		m.writeRecord(record)
+		// Alert once on crossing, not on every subsequent skip: a wedged job fires
+		// forever, and an alert per firing is how a real signal becomes noise.
+		if streak == skipAlertThreshold && m.onFailure != nil {
+			m.onFailure(name, record)
+		}
 		return
 	}
+	m.clearSkips(name)
 	defer lock.Unlock()
 
 	logDir := filepath.Join(m.paths.LogDir, "jobs", name)
@@ -458,4 +486,29 @@ func (m *Manager) jobLock(name string) *sync.Mutex {
 		m.locks[name] = &sync.Mutex{}
 	}
 	return m.locks[name]
+}
+
+// recordSkip increments a job's consecutive-overrun streak and returns the new count.
+// Kept on its own mutex rather than m.mu: this is called from the skip path while the
+// scheduler may hold m.mu for a reload, and the two have no reason to contend.
+func (m *Manager) recordSkip(name string) int {
+	m.skipMu.Lock()
+	defer m.skipMu.Unlock()
+	m.skipRuns[name]++
+	return m.skipRuns[name]
+}
+
+// clearSkips resets the streak. A run that starts proves the job is not wedged, so an
+// occasional overlap never accumulates toward a false alert.
+func (m *Manager) clearSkips(name string) {
+	m.skipMu.Lock()
+	defer m.skipMu.Unlock()
+	delete(m.skipRuns, name)
+}
+
+// SkipStreak reports a job's current consecutive-overrun count, for `loco status`.
+func (m *Manager) SkipStreak(name string) int {
+	m.skipMu.Lock()
+	defer m.skipMu.Unlock()
+	return m.skipRuns[name]
 }

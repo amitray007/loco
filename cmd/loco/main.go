@@ -160,6 +160,16 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// printPutWarnings surfaces a stored job's non-fatal warnings. They go to stderr: the
+// job WAS stored, so stdout's success line stays parseable, but a warning that only
+// appeared in --json would be invisible to the interactive user making the mistake.
+// JSON callers get them on the result itself.
+func printPutWarnings(warnings []string, stderr io.Writer) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(stderr, "warning: %s\n", warning)
+	}
+}
+
 // parseEnvPairs splits KEY=VALUE strings into a map, rejecting malformed entries.
 func parseEnvPairs(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
@@ -398,6 +408,7 @@ func runRegistry(args []string, p paths.Paths, globalJSON bool, stdout, stderr i
 			_, _ = fmt.Fprintf(stderr, "put registry entry: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -505,6 +516,7 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 			_, _ = fmt.Fprintf(stderr, "add cron job: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
@@ -550,10 +562,22 @@ func runCron(args []string, p paths.Paths, globalJSON bool, stdout, stderr io.Wr
 		}
 		sort.Strings(names)
 		table := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND")
+		_, _ = fmt.Fprintln(table, "NAME\tSCHEDULE\tCOMMAND\tSTATE")
 		for _, name := range names {
-			spec, _ := cronjob.DecodeSpec(jobs[name].Spec)
-			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "))
+			// A job whose spec will not decode cannot be scheduled and never fires.
+			// This used to discard the error and print the zero-value spec, so such a
+			// job rendered as blank columns — the one view that should expose it
+			// swallowed the evidence. Report the reason instead.
+			spec, err := cronjob.DecodeSpec(jobs[name].Spec)
+			if err != nil {
+				_, _ = fmt.Fprintf(table, "%s\t-\t-\tinvalid: %v\n", name, err)
+				continue
+			}
+			state := "scheduled"
+			if spec.Paused {
+				state = "paused"
+			}
+			_, _ = fmt.Fprintf(table, "%s\t%s\t%s\t%s\n", name, spec.Schedule, strings.Join(spec.Command, " "), state)
 		}
 		_ = table.Flush()
 		return 0
@@ -769,6 +793,7 @@ func runService(args []string, p paths.Paths, globalJSON bool, stdout, stderr io
 			_, _ = fmt.Fprintf(stderr, "add service: %v\n", err)
 			return 2
 		}
+		printPutWarnings(result.Warnings, stderr)
 		if globalJSON || *jsonFlag {
 			_ = json.NewEncoder(stdout).Encode(result)
 		} else if result.Changed {
