@@ -252,12 +252,13 @@ func serveConnection(conn net.Conn, state runtimeState, started time.Time, p pat
 			Topic  string `json:"topic"`
 			Cursor string `json:"cursor"`
 			Limit  int    `json:"limit"`
+			Holder string `json:"holder"`
 		}
 		if err := json.NewDecoder(reader).Decode(&request); err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: "decode read request: " + err.Error()})
 			return
 		}
-		result, err := eventStore.Read(request.Topic, request.Cursor, request.Limit)
+		result, err := eventStore.Read(request.Topic, request.Cursor, request.Holder, request.Limit)
 		if err != nil {
 			_ = encoder.Encode(wireError{SchemaVersion: SchemaVersion, Error: err.Error()})
 			return

@@ -337,6 +337,7 @@ func toolDefinitions() []tool {
 					"topic":  map[string]any{"type": "string", "description": "Event topic name"},
 					"cursor": map[string]any{"type": "string", "description": "Consumer cursor name"},
 					"limit":  map[string]any{"type": "integer", "description": "Maximum number of events to return (default 100)"},
+					"holder": map[string]any{"type": "string", "description": "Optional caller identity; lets loco warn if two consumers share this cursor, which double-processes every event"},
 				},
 				"required": []string{"topic", "cursor"},
 			},
@@ -432,6 +433,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 			Topic  string `json:"topic"`
 			Cursor string `json:"cursor"`
 			Limit  *int   `json:"limit"`
+			Holder string `json:"holder"`
 		}
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -443,7 +445,7 @@ func (s *server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		if args.Limit != nil {
 			limit = *args.Limit
 		}
-		return daemon.EventsRead(ctx, s.socket, callTimeout, args.Topic, args.Cursor, limit)
+		return daemon.EventsRead(ctx, s.socket, callTimeout, args.Topic, args.Cursor, args.Holder, limit)
 
 	case "loco_events_ack":
 		var args struct {

@@ -14,12 +14,13 @@ func EventsEmit(ctx context.Context, socket string, timeout time.Duration, input
 	err := eventRequest(ctx, socket, timeout, "events.emit", input, &result)
 	return result, err
 }
-func EventsRead(ctx context.Context, socket string, timeout time.Duration, topic, cursor string, limit int) (events.ReadResult, error) {
+func EventsRead(ctx context.Context, socket string, timeout time.Duration, topic, cursor, holder string, limit int) (events.ReadResult, error) {
 	request := struct {
 		Topic  string `json:"topic"`
 		Cursor string `json:"cursor"`
 		Limit  int    `json:"limit"`
-	}{topic, cursor, limit}
+		Holder string `json:"holder"`
+	}{topic, cursor, limit, holder}
 	var result events.ReadResult
 	err := eventRequest(ctx, socket, timeout, "events.read", request, &result)
 	return result, err

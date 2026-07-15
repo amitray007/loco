@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,14 +29,14 @@ func TestEmitReadAckAndDedupe(t *testing.T) {
 	if duplicate.Emitted || duplicate.Event.Seq != 1 {
 		t.Fatalf("duplicate=%+v", duplicate)
 	}
-	read, err := store.Read("demo.topic", "c1", 100)
+	read, err := store.Read("demo.topic", "c1", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(read.Events) != 1 || read.Events[0].ID != "same-id" {
 		t.Fatalf("read=%+v", read)
 	}
-	again, _ := store.Read("demo.topic", "c1", 100)
+	again, _ := store.Read("demo.topic", "c1", "", 100)
 	if len(again.Events) != 1 {
 		t.Fatal("read advanced cursor without ack")
 	}
@@ -46,11 +47,11 @@ func TestEmitReadAckAndDedupe(t *testing.T) {
 	if !ack.Changed || ack.ThroughSeq != 1 {
 		t.Fatalf("ack=%+v", ack)
 	}
-	empty, _ := store.Read("demo.topic", "c1", 100)
+	empty, _ := store.Read("demo.topic", "c1", "", 100)
 	if len(empty.Events) != 0 {
 		t.Fatalf("after ack=%+v", empty)
 	}
-	secondCursor, _ := store.Read("demo.topic", "c2", 100)
+	secondCursor, _ := store.Read("demo.topic", "c2", "", 100)
 	if len(secondCursor.Events) != 1 {
 		t.Fatal("broadcast cursor did not receive event independently")
 	}
@@ -90,7 +91,7 @@ func TestCompactionWaitsForEveryLiveCursorAndPreservesWatermark(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"c1", "c2"} {
-		if _, err := store.Read("compact", name, 100); err != nil {
+		if _, err := store.Read("compact", name, "", 100); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -131,7 +132,7 @@ func TestCompactionWaitsForEveryLiveCursorAndPreservesWatermark(t *testing.T) {
 	if newEvent.Event.Seq != 2 {
 		t.Fatalf("new seq=%d", newEvent.Event.Seq)
 	}
-	read, err := store.Read("compact", "c1", 100)
+	read, err := store.Read("compact", "c1", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +148,7 @@ func TestIdleCursorRetiresAndReturnsAtCompactionFloor(t *testing.T) {
 	if _, err := store.Emit(EmitInput{Topic: "retire", ID: "old", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read("retire", "abandoned", 100); err != nil {
+	if _, err := store.Read("retire", "abandoned", "", 100); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(31 * 24 * time.Hour)
@@ -158,7 +159,7 @@ func TestIdleCursorRetiresAndReturnsAtCompactionFloor(t *testing.T) {
 	if result.Removed != 1 || len(result.RetiredCursors) != 1 || result.RetiredCursors[0] != "abandoned" {
 		t.Fatalf("compact=%+v", result)
 	}
-	read, err := store.Read("retire", "abandoned", 100)
+	read, err := store.Read("retire", "abandoned", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func TestLimitAndAckThroughMiddleSequence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	read, err := store.Read("ordered", "consumer", 2)
+	read, err := store.Read("ordered", "consumer", "", 2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +212,7 @@ func TestLimitAndAckThroughMiddleSequence(t *testing.T) {
 	if _, err := store.Ack("ordered", "consumer", "two", false); err != nil {
 		t.Fatal(err)
 	}
-	remaining, err := store.Read("ordered", "consumer", 100)
+	remaining, err := store.Read("ordered", "consumer", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +241,7 @@ func TestConcurrentEmitsRemainMonotonicAndIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	read, err := store.Read("concurrent", "reader", 100)
+	read, err := store.Read("concurrent", "reader", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +283,7 @@ func TestOverviewReportsUnreadCountsAndOldEventWarning(t *testing.T) {
 	if _, err := store.Emit(EmitInput{Topic: "status.topic", ID: "old", Payload: json.RawMessage(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Read("status.topic", "consumer", 100); err != nil {
+	if _, err := store.Read("status.topic", "consumer", "", 100); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(15 * 24 * time.Hour)
@@ -318,7 +319,7 @@ func TestStrictAckRefusesToConsumeUnreadEvents(t *testing.T) {
 		}
 	}
 	// The consumer only ever saw e1.
-	read, err := store.Read("batch", "consumer", 1)
+	read, err := store.Read("batch", "consumer", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +340,7 @@ func TestStrictAckRefusesToConsumeUnreadEvents(t *testing.T) {
 	}
 	// The refusal must not have moved the watermark. All three stay deliverable: e1 was
 	// read but never acked, and a read does not consume.
-	redelivered, err := store.Read("batch", "consumer", 100)
+	redelivered, err := store.Read("batch", "consumer", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +363,7 @@ func TestAllowSkipConsumesUnreadEventsAndReportsIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.Read("skip", "consumer", 1); err != nil {
+	if _, err := store.Read("skip", "consumer", "", 1); err != nil {
 		t.Fatal(err)
 	}
 	result, err := store.Ack("skip", "consumer", "e3", true)
@@ -380,7 +381,7 @@ func TestAllowSkipConsumesUnreadEventsAndReportsIt(t *testing.T) {
 	if result.SkippedUnread != 2 {
 		t.Errorf("SkippedUnread = %d, want 2 — an override with no record is still silent", result.SkippedUnread)
 	}
-	remaining, err := store.Read("skip", "consumer", 100)
+	remaining, err := store.Read("skip", "consumer", "", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +400,7 @@ func TestStrictAckDoesNotFireOnACursorWithNoReadHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.Read("legacy", "old", 100); err != nil {
+	if _, err := store.Read("legacy", "old", "", 100); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate a pre-upgrade cursor: read history unknown, watermark at the start.
@@ -414,6 +415,105 @@ func TestStrictAckDoesNotFireOnACursorWithNoReadHistory(t *testing.T) {
 	if _, err := store.Ack("legacy", "old", "e2", false); err != nil {
 		t.Fatalf("strict ack blocked a cursor with no recorded read history: %v", err)
 	}
+}
+
+// Two consumers on one cursor both receive every event and both act on it. That is not
+// a race — read does not advance the cursor, so serialization is irrelevant and the
+// duplicate is the documented design. It is also why nothing detects it. loco cannot
+// obtain reader identity (the read RPC carries none; macOS peer credentials give a uid
+// but no pid, and every consumer here runs as the same user), so a holder is a hint from
+// a cooperating caller and the warning is a backstop, not a guarantee.
+func TestStatusWarnsWhenTwoHoldersShareACursor(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if _, err := store.Emit(EmitInput{Topic: "shared", ID: "e1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// One consumer: no warning.
+	if _, err := store.Read("shared", "dev-loop", "sweep-a", 100); err != nil {
+		t.Fatal(err)
+	}
+	if warning := cursorWarning(t, store, "shared", "dev-loop"); warning != "" {
+		t.Fatalf("a single holder warned: %q", warning)
+	}
+
+	// A second consumer on the same cursor: both get e1, and status must say so.
+	second, err := store.Read("shared", "dev-loop", "cron-drain", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Events) != 1 {
+		t.Fatalf("second consumer did not receive the event: %+v", second)
+	}
+	warning := cursorWarning(t, store, "shared", "dev-loop")
+	if warning == "" {
+		t.Fatal("two holders on one cursor produced no warning")
+	}
+	for _, want := range []string{"sweep-a", "cron-drain", "2 holders"} {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning %q does not mention %q", warning, want)
+		}
+	}
+
+	// A holder that stopped reading long ago is not a current second consumer.
+	now = now.Add(2 * concurrentReaderWindow)
+	if _, err := store.Read("shared", "dev-loop", "sweep-a", 100); err != nil {
+		t.Fatal(err)
+	}
+	if warning := cursorWarning(t, store, "shared", "dev-loop"); strings.Contains(warning, "holders") {
+		t.Errorf("a holder outside the window still warned: %q", warning)
+	}
+}
+
+// The existing stale-events warning and the shared-cursor warning can both apply; one
+// must not silently overwrite the other.
+func TestCursorWarningsCombineRatherThanOverwrite(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if _, err := store.Emit(EmitInput{Topic: "both", ID: "e1", Payload: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("both", "c", "reader-a", 100); err != nil {
+		t.Fatal(err)
+	}
+	// Let the event go stale, then have two holders read within the window.
+	now = now.Add(RetentionFloor + time.Hour)
+	if _, err := store.Read("both", "c", "reader-a", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("both", "c", "reader-b", 100); err != nil {
+		t.Fatal(err)
+	}
+	warning := cursorWarning(t, store, "both", "c")
+	if !strings.Contains(warning, "14d") {
+		t.Errorf("stale-events warning lost: %q", warning)
+	}
+	if !strings.Contains(warning, "holders") {
+		t.Errorf("shared-cursor warning lost: %q", warning)
+	}
+}
+
+func cursorWarning(t *testing.T, store *Store, topic, cursor string) string {
+	t.Helper()
+	overview, err := store.Overview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range overview {
+		if item.Name != topic {
+			continue
+		}
+		for _, cs := range item.Cursors {
+			if cs.Name == cursor {
+				return cs.Warning
+			}
+		}
+	}
+	t.Fatalf("cursor %q not found on topic %q", cursor, topic)
+	return ""
 }
 
 // --- Regression tests for adversarial findings (fix/adversarial-findings) ---
@@ -439,7 +539,7 @@ func TestTornTrailingLineIsRecovered(t *testing.T) {
 	f.Close()
 
 	// Reads must still work and return the two good events.
-	read, err := store.Read("crash", "r", 100)
+	read, err := store.Read("crash", "r", "", 100)
 	if err != nil {
 		t.Fatalf("torn tail bricked the topic: %v", err)
 	}
@@ -475,7 +575,7 @@ func TestMidFileCorruptionStillErrors(t *testing.T) {
 	// Corruption is detected on a cold load (e.g. daemon restart), so read through a
 	// fresh store pointed at the same directory rather than the warm in-memory cache.
 	fresh := New(store.root, store.alerts)
-	if _, err := fresh.Read("mid", "r", 100); err == nil {
+	if _, err := fresh.Read("mid", "r", "", 100); err == nil {
 		t.Fatal("expected mid-file corruption to error, got nil")
 	}
 }
@@ -545,7 +645,7 @@ func TestCompactPrunesIDMap(t *testing.T) {
 		store.Emit(EmitInput{Topic: "t", ID: id, Payload: json.RawMessage(`{}`)})
 	}
 	// A cursor that acks everything so events become eligible for compaction.
-	store.Read("t", "c", 100)
+	store.Read("t", "c", "", 100)
 	store.Ack("t", "c", "old2", false)
 	store.now = func() time.Time { return base.Add(30 * 24 * time.Hour) }
 	res, err := store.Compact("t")
@@ -579,14 +679,14 @@ func TestReadLimitZeroAndNegative(t *testing.T) {
 	for _, id := range []string{"e1", "e2", "e3"} {
 		store.Emit(EmitInput{Topic: "lim", ID: id, Payload: json.RawMessage(`{}`)})
 	}
-	zero, err := store.Read("lim", "c", 0)
+	zero, err := store.Read("lim", "c", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(zero.Events) != 0 {
 		t.Fatalf("limit 0 returned %d events, want 0", len(zero.Events))
 	}
-	if _, err := store.Read("lim", "c", -5); err == nil {
+	if _, err := store.Read("lim", "c", "", -5); err == nil {
 		t.Fatal("negative limit should error")
 	}
 }

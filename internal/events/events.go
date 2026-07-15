@@ -118,6 +118,16 @@ type Cursor struct {
 	LastAckAt   string `json:"last_ack_at,omitempty"`
 	Status      string `json:"status"`
 	RetiredAt   string `json:"retired_at,omitempty"`
+	// Readers records the most recent read time per self-declared holder, so status can
+	// point out that two consumers share a cursor. Two consumers on one cursor both
+	// receive every event and both act on it — read does not advance the cursor, so
+	// this is by design and is exactly why nothing detects it.
+	//
+	// Identity is caller-supplied because loco cannot obtain it: the read RPC carries
+	// none, and unix-socket peer credentials give a pid on Linux but only uid/gid on
+	// macOS (Xucred has no Pid field), where every consumer runs as the same user. A
+	// holder is a hint from a cooperating caller, not an authenticated identity.
+	Readers map[string]string `json:"readers,omitempty"`
 }
 type Alert struct {
 	SchemaVersion int    `json:"schema_version"`
@@ -218,7 +228,15 @@ func (s *Store) Emit(input EmitInput) (EmitResult, error) {
 	return EmitResult{SchemaVersion: SchemaVersion, Emitted: true, Event: event}, nil
 }
 
-func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
+// readerHistoryLimit bounds how many distinct holders a cursor remembers. The point is
+// to notice that a second consumer exists, not to keep a roster; without a bound, a
+// caller passing a unique holder per invocation would grow the cursor file forever.
+const readerHistoryLimit = 8
+
+// Read returns a cursor's unread events without advancing it. holder, when non-empty,
+// is the caller's self-declared identity, recorded so status can report two consumers
+// sharing one cursor. It is optional and unauthenticated — see Cursor.Readers.
+func (s *Store) Read(topic, cursorName, holder string, limit int) (ReadResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := validateComponent("topic", topic); err != nil {
@@ -253,6 +271,23 @@ func (s *Store) Read(topic, cursorName string, limit int) (ReadResult, error) {
 		cursor = Cursor{SchemaVersion: SchemaVersion, Topic: topic, Name: cursorName, LastAckedSeq: last, CreatedAt: now, Status: "live"}
 	}
 	cursor.LastReadAt, cursor.Status, cursor.RetiredAt = now, "live", ""
+	if holder != "" {
+		if cursor.Readers == nil {
+			cursor.Readers = make(map[string]string, 1)
+		}
+		cursor.Readers[holder] = now
+		// Evict the oldest once over the bound, so a caller that passes a unique holder
+		// each time cannot grow the file without limit.
+		for len(cursor.Readers) > readerHistoryLimit {
+			oldestHolder, oldestAt := "", ""
+			for name, at := range cursor.Readers {
+				if oldestAt == "" || at < oldestAt {
+					oldestHolder, oldestAt = name, at
+				}
+			}
+			delete(cursor.Readers, oldestHolder)
+		}
+	}
 	result := ReadResult{SchemaVersion: SchemaVersion, Topic: topic, Cursor: cursorName, Events: make([]Event, 0)}
 	for _, event := range all {
 		if len(result.Events) >= limit {
@@ -566,6 +601,7 @@ func (s *Store) Overview() ([]TopicStatus, error) {
 		sort.Slice(cursors, func(i, j int) bool { return cursors[i].Name < cursors[j].Name })
 		for _, cursor := range cursors {
 			cs := CursorStatus{Name: cursor.Name, Status: cursor.Status, LastAckedSeq: cursor.LastAckedSeq}
+			var warnings []string
 			var oldest time.Time
 			for _, event := range all {
 				if event.Seq > cursor.LastAckedSeq {
@@ -576,14 +612,56 @@ func (s *Store) Overview() ([]TopicStatus, error) {
 				}
 			}
 			if cursor.Status == "live" && !oldest.IsZero() && now.Sub(oldest) > RetentionFloor {
-				cs.Warning = "unacked events older than 14d"
+				warnings = append(warnings, "unacked events older than 14d")
 			}
+			// Both conditions can hold at once, and a cursor being double-consumed is
+			// not less worth saying because its events are also stale. Join rather than
+			// let one silently overwrite the other.
+			if warning := concurrentReaderWarning(cursor, now); warning != "" {
+				warnings = append(warnings, warning)
+			}
+			cs.Warning = strings.Join(warnings, "; ")
 			item.Cursors = append(item.Cursors, cs)
 		}
 		result = append(result, item)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result, nil
+}
+
+// concurrentReaderWindow is how recently two holders must both have read for a cursor to
+// look actively shared. Long enough to catch two consumers on ordinary polling cadences,
+// short enough that a holder renamed months ago does not warn forever.
+const concurrentReaderWindow = time.Hour
+
+// concurrentReaderWarning reports whether more than one holder has read this cursor
+// recently. Two consumers on one cursor both receive every event and both act on it:
+// read does not advance the cursor, so this is not a race — it is the documented design,
+// and it is exactly why nothing detects the duplicate today.
+//
+// This only sees holders that identify themselves. A consumer that passes no holder is
+// invisible here, so silence is not proof of a single consumer — which is why the
+// single-consumer contract stays the primary defence and this is a backstop.
+func concurrentReaderWarning(cursor Cursor, now time.Time) string {
+	if len(cursor.Readers) < 2 {
+		return ""
+	}
+	recent := make([]string, 0, len(cursor.Readers))
+	for holder, at := range cursor.Readers {
+		stamp, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			continue
+		}
+		if now.Sub(stamp) <= concurrentReaderWindow {
+			recent = append(recent, holder)
+		}
+	}
+	if len(recent) < 2 {
+		return ""
+	}
+	sort.Strings(recent)
+	return fmt.Sprintf("read by %d holders within %s (%s) — one consumer per cursor, or both process every event",
+		len(recent), concurrentReaderWindow, strings.Join(recent, ", "))
 }
 
 func (s *Store) RecentAlerts(since time.Time, limit int) ([]Alert, error) {
