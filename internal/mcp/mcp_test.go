@@ -331,3 +331,57 @@ func TestOversizedLineDoesNotWedgeSession(t *testing.T) {
 		t.Fatalf("session did not recover; last line: %s", lines[len(lines)-1])
 	}
 }
+
+// With no channel topics configured, initialize must be byte-identical to the
+// pure-tools server: no experimental capability, no instructions. This is the
+// rollout-safety property — the shipped mcp serve behavior cannot change.
+func TestInitializeWithoutChannelIsUnchanged(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")
+	if err := ServeChannel(context.Background(), "/nonexistent.sock", "test", ChannelConfig{}, in, &out); err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		Result struct {
+			Capabilities map[string]any `json:"capabilities"`
+			Instructions string         `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resp.Result.Capabilities["experimental"]; ok {
+		t.Fatal("experimental capability present without channel topics")
+	}
+	if resp.Result.Instructions != "" {
+		t.Fatal("instructions present without channel topics")
+	}
+}
+
+// With topics configured, initialize declares the channel capability and ships the
+// mandatory untrusted-data instructions.
+func TestInitializeWithChannelDeclaresCapability(t *testing.T) {
+	var out bytes.Buffer
+	in := strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}` + "\n")
+	cfg := ChannelConfig{Topics: []string{"a.b"}, Poll: time.Hour} // long poll: no ticks during the test
+	if err := ServeChannel(context.Background(), "/nonexistent.sock", "test", cfg, in, &out); err != nil {
+		t.Fatal(err)
+	}
+	var resp struct {
+		Result struct {
+			Capabilities struct {
+				Experimental map[string]any `json:"experimental"`
+			} `json:"capabilities"`
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := resp.Result.Capabilities.Experimental["claude/channel"]; !ok {
+		t.Fatalf("claude/channel capability missing: %+v", resp.Result.Capabilities)
+	}
+	if !strings.Contains(resp.Result.Instructions, "untrusted data") {
+		t.Fatalf("instructions missing the untrusted-data clause: %q", resp.Result.Instructions)
+	}
+}
