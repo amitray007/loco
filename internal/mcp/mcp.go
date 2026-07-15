@@ -117,11 +117,23 @@ func ServeVersion(ctx context.Context, socket, version string, in io.Reader, out
 func ServeChannel(ctx context.Context, socket, version string, cfg ChannelConfig, in io.Reader, out io.Writer) error {
 	s := &server{socket: socket, version: version, channel: cfg, out: bufio.NewWriter(out)}
 
-	// The tail lives exactly as long as this session.
+	// The tail lives exactly as long as this session. stopTail only signals cancellation;
+	// it does not block until runTail returns. Without joining on tailDone, ServeChannel
+	// could return (and its caller could close/reuse the writer) while the tail goroutine
+	// is still mid-poll and about to call s.pushChannelEvent -> s.notify -> s.out.Write on
+	// a writer that is no longer safe to use. Cancel first, then wait, on every exit path.
 	tailCtx, stopTail := context.WithCancel(ctx)
-	defer stopTail()
+	var tailDone sync.WaitGroup
+	defer func() {
+		stopTail()
+		tailDone.Wait()
+	}()
 	if cfg.enabled() {
-		go runTail(tailCtx, socket, cfg, s.pushChannelEvent)
+		tailDone.Add(1)
+		go func() {
+			defer tailDone.Done()
+			runTail(tailCtx, socket, cfg, s.pushChannelEvent)
+		}()
 	}
 
 	// Use a Reader (not a Scanner) so an oversized frame cannot permanently wedge the
