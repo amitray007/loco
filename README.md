@@ -85,8 +85,6 @@ below for what's deliberately *not* here yet.
 brew install amitray007/tap/loco
 ```
 
-> Tap not published yet — coming soon.
-
 ### go install
 
 ```sh
@@ -110,10 +108,10 @@ systemd user unit on Linux, and starts at login):
 loco daemon install
 ```
 
-Add a cron job:
+Add a cron job (the command goes in `--cmd`; the job name is positional):
 
 ```sh
-loco cron add --name backup --schedule "0 * * * *" -- /usr/local/bin/backup.sh
+loco cron add backup --schedule "0 * * * *" --cmd /usr/local/bin/backup.sh
 loco cron list
 ```
 
@@ -123,12 +121,13 @@ Run it immediately without waiting for the schedule:
 loco cron run-now backup
 ```
 
-Emit and read an event on the bus:
+Emit and read an event on the bus. The topic is positional; a consumer reads
+at its own pace via a named `--cursor`, then acks what it processed:
 
 ```sh
-loco events emit --topic backups --id backup-2026-07-15 --data '{"ok":true}'
-loco events read --topic backups --consumer my-consumer
-loco events ack --topic backups --consumer my-consumer --cursor <cursor>
+loco events emit backups --id backup-2026-07-15 --data '{"ok":true}'
+loco events read backups --cursor my-consumer
+loco events ack backups --cursor my-consumer --through backup-2026-07-15
 ```
 
 Check on things:
