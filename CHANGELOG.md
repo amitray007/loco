@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once a first tagged release exists.
 
+## [0.1.4](https://github.com/amitray007/loco/compare/v0.1.3...v0.1.4) (2026-07-16)
+
+
+### Documentation
+
+* fix broken README quickstart and stale tap notice ([c9e3b71](https://github.com/amitray007/loco/commit/c9e3b7110e6e0205b76988d01bdb66db1392d365))
+* rewrite cli.md and examples.md to the real command surface ([2390b3d](https://github.com/amitray007/loco/commit/2390b3d73c47fbf4f28781743646f073ea600d45))
+* stop shipping internal planning docs ([463ab0a](https://github.com/amitray007/loco/commit/463ab0a2bfb1a05820d7980eaf88bf4028baedec))
+
 ## [0.1.3](https://github.com/amitray007/loco/compare/v0.1.2...v0.1.3) (2026-07-15)
 
 
