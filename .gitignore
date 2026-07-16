@@ -2,3 +2,11 @@
 *.log
 .DS_Store
 dist/
+
+# Agent/session metadata. These capture verbatim transcripts of tool output,
+# which can include the contents of any file a session read — credentials
+# included. Never commit them.
+.entire/
+.claude/
+.codex/
+*.jsonl
