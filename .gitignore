@@ -10,3 +10,10 @@ dist/
 .claude/
 .codex/
 *.jsonl
+
+# Internal planning docs kept on disk but not shipped publicly — they predate
+# the shipped CLI, contradict it, and reference private projects.
+/docs/plan.md
+/docs/final-plan.md
+/docs/roadmap.md
+/docs/superpowers/
