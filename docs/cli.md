@@ -1,295 +1,153 @@
-# loco CLI reference — every verb, what it's for, when you'd reach for it
+# loco CLI reference
 
-Design rules that govern everything below:
+Every command below is what the `loco` binary actually implements. Design
+rules that hold across the whole surface:
 
-1. **noun → verb** taxonomy; no aliases until muscle memory demands them.
-2. **TTY-aware output**: human tables interactive, JSON when piped; `--json`
-   forces it; every JSON payload carries `schema_version`.
-3. **Exit codes are API**: 0 success (incl. empty results), 1 caller error,
-   2 loco/system error. Data lives in JSON, never exit codes.
-4. **Reads never mutate** — cursor advancement is an explicit `ack`.
-5. **Everything idempotent**: `apply`, `ack`, `daemon install`, `emit --id`
-   are all safe to re-run.
+1. **noun → verb** taxonomy (`cron add`, `events read`, `svc restart`).
+2. **`--json` everywhere**: every command takes `--json` for machine-readable
+   output; without it you get human-oriented text.
+3. **Exit codes are contract**: `0` success (including empty results), `1`
+   caller/argument error, `2` loco/system error. Data lives in the output,
+   never in the exit code.
+4. **Reads never mutate**: `events read` does not advance a cursor — that is
+   an explicit `events ack`.
+5. **Idempotent creates**: `daemon install` and `events emit --id` are safe to
+   re-run.
 
----
-
-## Foundation — the durable body
-
-### `loco daemon install | uninstall | status | run`
-The one resident process, owned by launchd (`KeepAlive` restarts it on crash
-and boot). `install` writes the plist; `run` is the foreground entry launchd
-invokes; `status` reports pid/uptime/version.
-**Use when:** once per machine, then never think about it. `status` is the
-first thing `doctor` and heartbeats check.
-
-### `loco apply [dir] [--dry-run] [--prune]`
-Reads `.loco/jobs.yaml` from a project and syncs it into the registry —
-declarative, versioned, reviewable. `--dry-run` shows the diff; `--prune`
-removes jobs the manifest no longer declares.
-**Use when:** a repo adds/changes automation. The manifest change ships as a
-normal PR (reviewable by your own PR autopilot), then `loco apply` once.
-
-### `loco jobs list`
-Everything registered, across all projects, with kind/state/schedule/owner —
-including dynamic (agent-created) jobs with their TTL and provenance.
-**Use when:** "what is this machine actually running for me?"
-
-### `loco jobs promote <job>`
-Writes a dynamic job's definition into the owning project's `.loco/jobs.yaml`
-(and clears its TTL) so it becomes a reviewed, durable, manifest-managed job.
-**Use when:** a job created on the fly has earned its keep. This is the
-spike-then-formalize lifecycle made mechanical: agents create fast, and what
-survives gets promoted into code review.
-
-### Dynamic job creation (agent-speed, no manifest required)
-`loco svc add <name> --cmd … [--ttl 24h] [--reason "…"]` and
-`loco cron add <name> --schedule … --cmd … [--ttl 7d] [--reason "…"]`
-create jobs ON THE FLY. Every dynamic job carries **provenance** (owner agent
-from `hello`, session, stated reason) and a **TTL lease** — it expires unless
-renewed (`loco jobs renew`) or promoted. `recap` surfaces expiring and
-orphaned dynamic jobs, so decay is visible, never silent.
-**Use when:** mid-task, an agent needs a watcher or a schedule NOW. Fast to
-create, impossible to orphan quietly, promotable when proven.
-
-### `loco svc list | start | stop | restart <job>`
-Supervised long-running services: env injection from the project, stdout/stderr
-captured, restart with backoff, every lifecycle event recorded.
-**Use when:** the pr-watch watcher; a Slack thread poller; any dev server or
-tunnel you want kept alive. This is the verb that retires the reaped-background
-problem — the daemon owns the children, sessions don't.
-
-### `loco cron list | run-now <job>`
-Durable schedules (real cron syntax) with uniform run records. `run-now`
-triggers a manual, fully-recorded execution.
-**Use when:** identity-check daily, mirror pre-sync weekday mornings,
-kb-validate nightly, your 17:55 daily-review emitter. `run-now` is for
-"did I fix it?" after editing a job's script.
-
-### `loco notify <title> <body> [--channel macos|slack|file] [--group <key>]`
-Human alerting as a primitive anyone can call — jobs (via `notify_on:
-[crash, nonzero]` in manifests), agents, or you from a script. `--group`
-dedupes: a crash-looping service produces ONE grouped alert, not two hundred.
-**Use when:** anything that should interrupt a human. Everything else should
-be an event, not a notification.
-
-### `loco doctor`
-Self-test of the whole chain: daemon alive, plist current, config writable,
-events disk/retention, adapters detected (MCP registered? Claude plugin
-installed?), sample notify.
-**Use when:** after install, after upgrades, or when anything feels off.
-Also the first diagnostic any agent runs before blaming its own logic.
+Global flag: `--config-dir DIR` (or `LOCO_CONFIG_DIR`) selects the config/state
+directory. Default is the OS config dir (`XDG_CONFIG_HOME` on Linux).
 
 ---
 
-## Legibility — the memory agents read
+## Daemon
 
-### `loco status --json`
-The one-call situational overview: daemon health, every job's state and last
-run, every topic's unread count per cursor, alerts in the last 24h.
-**Use when:** the first call of any agent iteration and any human curiosity.
-Designed to make "checking on things" cost a few hundred tokens, not 70KB (a modest
-real workload measures ~500 tokens; it scales with the number of topics and cursors).
+The one resident process, owned by launchd (macOS) or a systemd user unit
+(Linux). It supervises everything else.
 
-### `loco recap [--since 8h]`
-The same data as prose: "pr-watch dispatched twice (one approved), identity
-green, kb-validate flagged one file, 0 restarts."
-**Use when:** session start (injected by the SessionStart hook), or you
-returning to your desk. Replaces re-reading logs to reconstruct the day.
+```
+loco daemon install               # write the service unit and start at login
+loco daemon uninstall             # stop and remove the service
+loco daemon status [--json]       # pid, uptime, version
+loco daemon run                   # foreground entry point the OS service invokes
+loco daemon watchdog [--threshold N]
+```
 
-### `loco runs <job> [--last N] [--failed]`
-Structured run records: start/end, exit code, duration, stderr tail. This is
-the audit trail — every autonomous action leaves one.
-**Use when:** "why did identity-check fail at 08:17?" — an agent diagnoses
-from the record instead of re-running the failure.
+`install` is a once-per-machine step. `run` is not meant to be invoked by
+hand — it is what the launchd plist / systemd unit calls.
 
-### `loco logs <job> [--since 10m] [--run <id>] [-f]`
-The captured stdout/stderr behind a run record, sliceable, tailable.
-**Use when:** the run record's stderr tail isn't enough and you need the
-full output of one specific run.
+## Cron jobs
 
-### `loco artifacts get | tail <id> [-n N]`
-Large outputs stored by reference: test logs, generated reports, big diffs.
-Events and run records carry artifact IDs; consumers fetch slices.
-**Use when:** anything that would flood agent context. The release-list
-report, a full pytest log — fetch the 50 lines that matter.
+Durable schedules in standard cron syntax, each with uniform run records.
 
----
+```
+loco cron add NAME --schedule CRON --cmd COMMAND \
+    [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] [--timeout D] [--json]
+loco cron list [--json]
+loco cron run-now NAME [--json]       # trigger a manual, fully-recorded run
+loco cron pause NAME [--json]
+loco cron resume NAME [--json]
+loco cron remove NAME [--json]
+```
 
-## The bus — how agents hear and speak
+`--env KEY=VALUE` sets a literal value; `--env-passthrough KEY` forwards a
+variable from the daemon's environment without recording its value. Prefer
+`--env-passthrough` for secrets. `--timeout D` bounds a single run (e.g. `30m`).
 
-### `loco events emit <topic> [--data @-|'json'] [--id <dedup-id>]`
-Producers append one JSON event to a topic. `--id` makes re-emits no-ops.
-This is the ENTIRE integration burden for a producer — one line from any
-language, any script.
-**Use when:** pr-watch found a dispatch; the Slack poller saw a release
-thread; a conductor wants to leave work for the oncall role.
+## Services
 
-### Topic modes: broadcast vs queue
-Topics are created in one of two modes (declared at first emit or in a
-manifest):
-- **broadcast** (default): every consumer has its own cursor and sees EVERY
-  event — e.g. `pr-review.dispatch` read independently by the loop, an
-  auditor, and recap.
-- **queue**: competing consumers; `loco events claim <topic> --as <agent>
-  [--lease 10m]` hands each event to exactly ONE claimant. A crashed
-  claimant's lease expires and the event returns to the queue.
-  Complete with `loco events done <topic> --id <event-id>`.
-**Use when:** broadcast for "everyone should know"; queue for "exactly one
-of you should do this" (e.g. `tasks.oncall`).
+Supervised long-running processes: stdout/stderr captured, restart with
+backoff, every lifecycle event recorded.
 
-### `loco events read <topic> --cursor <name> [--limit N] [--fail-empty]`
-Non-destructive pull from a broadcast topic at a named cursor.
-At-least-once: reading does NOT advance the cursor.
-**Use when:** every loop tick. Empty array + exit 0 = quiet cycle, done in
-one call.
+```
+loco svc add NAME --cmd COMMAND [--restart POLICY] \
+    [--working-dir DIR] [--env KEY=VALUE] [--env-passthrough KEY] \
+    [--backoff-initial D] [--backoff-max D] [--json]
+loco svc list [--json]
+loco svc start NAME [--json]
+loco svc stop NAME [--json]
+loco svc restart NAME [--json]
+loco svc remove NAME [--json]
+```
 
-### `loco events ack <topic> --cursor <name> (--ids <id,…> | --through <id>)`
-Explicit cursor commit. Separate from `read` so an agent that crashes
-mid-processing re-reads the same events instead of losing them.
-`--ids` names the events you processed: the cursor advances over the longest
-contiguous run and stops at the first one you did not name, so a batch with a
-failure in the middle no longer consumes the failure. Ids above the gap are
-reported and redelivered. `--through` is a watermark — it consumes that event
-and everything below it, processed or not.
-**Use when:** after the work for those events actually completed (conductor
-reported, state merged) — not before.
+## Event bus
 
-### `loco events topics`
-All topics with per-cursor unread counts and last-event timestamps.
-**Use when:** discovering what exists; spotting an orphaned cursor whose
-consumer died.
+Topic-based, append-only, at-least-once. Producers emit; consumers read at
+their own pace via a named cursor and ack what they processed.
 
-### `loco hello --agent <name>`
-DHCP for agents — with **succession semantics**: the NAME (a role, e.g.
-`dev-loop`) owns the identity, the reply topic, the cursors, the dynamic
-jobs, and the pending work; each session is an *incarnation* that inherits
-all of it. `hello` returns the identity plus a briefing: unacked events,
-orphaned run results addressed to this role, expiring dynamic jobs, job
-health, and the verbs you'll need. Agents are mortal; roles are not.
-**Use when:** the FIRST call of any session in any harness. A successor
-session picks up exactly where its predecessor died, in one round-trip.
+```
+loco events emit TOPIC --data JSON [--id ID] [--source-job NAME] [--json]
+loco events read TOPIC --cursor NAME [--holder NAME] [--limit N] [--wait [--timeout D]] [--json]
+loco events peek TOPIC [--tail N] [--from-seq S] [--json]
+loco events ack  TOPIC --cursor NAME (--ids ID[,ID...] | --through ID) [--allow-skip] [--json]
+loco events list [--json]
+```
 
-### `loco onboard [--harness claude|generic] [--install]`
-Emits loco's own usage instructions as a prompt block, tuned per harness
-capability tier; `--install` writes/refreshes the block into the files
-agents already read (AGENTS.md, CLAUDE.md). The tool carries its own manual,
-aimed at machine readers.
-**Use when:** wiring a new repo or a new harness. This is the universal
-tier-0 integration: an agent with nothing but shell access reads the
-instructions and participates correctly.
+- **`emit`** appends one JSON event. `--id` makes re-emits with the same id a
+  no-op, so a retried producer is safe.
+- **`read`** is a non-destructive pull at a named cursor. It does *not* advance
+  the cursor. `--holder NAME` identifies the consumer so loco can warn if a
+  second one shares the cursor (there should be exactly one consumer per
+  cursor). `--wait` blocks until an event arrives or `--timeout` elapses.
+- **`peek`** inspects a topic without any cursor — `--tail N` for the last N
+  events, `--from-seq S` from a sequence number. Use this to look, not to
+  consume; it never mints a cursor.
+- **`ack`** commits the cursor. `--ids` names the events you processed: the
+  cursor advances over the longest contiguous run and stops at the first id you
+  did not name, so a batch with a failure in the middle does not silently
+  consume the failure. `--through` is a watermark — it consumes that event and
+  everything before it, processed or not.
+- **`list`** shows all topics with per-cursor unread counts.
 
----
+## Situational awareness
 
-## The broker — capabilities agents lack under harness restrictions
+```
+loco status [--json]                          # daemon health, jobs, topics, recent alerts
+loco doctor [--json]                          # non-destructive health checks
+loco runs JOB [--last N] [--failed] [--json]  # structured run records for a job
+loco logs JOB [--run ID] [--stderr]           # captured stdout/stderr for a job's runs
+```
 
-### `loco run <cmd> --project <p> [--label] [--reply-to <topic>] [--ttl]`
-Delegated background execution that OUTLIVES the requesting session. Returns
-a run_id immediately; result (exit, duration, artifact ref) is emitted to the
-reply topic when done. **Policy-gated**: manifest-declared commands and
-allowlisted patterns run freely; anything else queues as pending-approval and
-notifies the human — delegation extension, never permission bypass.
-**Use when:** "run the full test suite while I keep reviewing"; a 20-minute
-mirror grep; anything you'd hesitate to run inline for time or survival
-reasons.
+`status` is the one-call overview: daemon state, each job's last run, each
+topic's unread counts, recent alerts. `runs` is the audit trail — start/end,
+exit code, duration, stderr tail per run. `logs` retrieves the full captured
+output behind a run.
 
-### `loco watch <cmd> --until <pattern> [--reply-to <topic>]`
-A durable monitor: run/poll a command, emit when the pattern appears,
-independent of any session's lifetime.
-**Use when:** watch a deploy finish, a CI run flip, a file appear — and
-still get the answer even if the session that asked is long gone.
+## Notifications
 
-### `loco timer set --in 72h | --at <ts> --topic <t> --data <json>`
-Durable future intents: at the appointed time, loco emits the event.
-**Use when:** "if the promised follow-up issue isn't filed in 3 days, poke
-the loop" — the loose-ends pattern, generalized to anything.
+```
+loco notify TITLE BODY [--channel macos|file] [--group KEY] [--json]
+```
 
-### `loco cache exec --key <k> --ttl 5m -- <cmd>`
-Memoized command execution shared across all consumers: within TTL, repeat
-calls return the cached result without re-running.
-**Use when:** five agents (or one agent five times) asking "CI status?"
-within minutes — one API call, protected rate limits, near-zero tokens.
+Human alerting as a primitive any job or script can call. `--group KEY` dedupes:
+a crash-looping service produces one grouped alert, not hundreds. The channel
+is also settable via `LOCO_NOTIFY_CHANNEL` (`desktop`/`macos` or `file`);
+`desktop` and `macos` are equivalent.
 
-### `loco lock acquire | release <name> [--ttl 5m]`
-Leases for cross-session coordination over shared resources. TTL prevents a
-dead holder from wedging everyone.
-**Use when:** two sessions might merge into the same state file — the
-concurrent-writer bug class, solved as a primitive.
+## Registry (low-level)
 
-### `loco state get | set <key> [--ns <namespace>]`
-Small shared KV for cross-session working memory.
-**Use when:** a multi-day effort needs scratch state that isn't worth a
-whole file convention.
+Direct read/write of the job registry. Most users go through `cron`/`svc`
+instead; this is the primitive underneath them.
 
----
+```
+loco registry put NAME --kind cron|svc [--data JSON] [--json]
+loco registry list [--json]
+```
 
-## Adapters — the delivery ladder (thin by design)
+## MCP server
 
-| Adapter | Tier | Adds | Notes |
-|---|---|---|---|
-| CLI + files | 0 | everything via pull | works in ANY harness that can shell out |
-| `loco mcp serve` | 1 | the verbs as native MCP tools | no Bash mediation; most modern harnesses |
-| loco-plugin hooks | 2 | SessionStart/Stop queue-drain into context | Claude Code |
-| loco-plugin channel | 3 | live push (<channel> tags) + ack reply tool | Claude Code, research preview |
+```
+loco mcp serve [--channel-topics a,b] [--channel-poll D]
+```
 
-Invariant across tiers: **files are the truth; tiers only change latency.**
-An agent on tier 0 sees identical data to one on tier 3, later. Falling down
-the ladder can never lose or corrupt anything.
+Runs a stdio MCP server exposing the daemon's read/emit tools to an agent.
+With `--channel-topics` (or `LOCO_CHANNEL_TOPICS`) it also pushes each named
+topic's new events into a running Claude Code session as they arrive. No
+topics means no pushes. The tail is stateless: it starts at each topic's
+current tail, creates no cursor, and never replays a backlog — the bus remains
+the durable record. See the README for the `.mcp.json` wiring.
 
-### `loco mcp serve [--channel-topics a,b] [--channel-poll D]`
+## Version
 
-Runs a stdio MCP server exposing the daemon's read/emit tools to an agent. With
-`--channel-topics` (or `LOCO_CHANNEL_TOPICS`) it also declares the Claude Code
-`claude/channel` capability and pushes each named topic's new events into the session as
-they arrive. No topics = no pushes. The tail is stateless: it starts at each topic's
-current tail, creates no cursor, and never replays a backlog.
-
-**The channel adapter is the flagship.** loco's reason to exist includes
-proactively TELLING agents what it found — the loco-plugin channel server
-pushes events into live Claude Code sessions as `<channel source="loco"
-topic="…">` tags within seconds, filtered per session (your reply topic +
-subscribed shared topics), with `ack`/`claim` exposed as reply tools. Hooks
-and CLI remain the lossless floor beneath it.
-
-## Human surface — `loco ui` (OpenTUI dashboard)
-
-Humans shouldn't have to speak the CLI. `loco ui` launches a full-screen
-terminal dashboard built with **OpenTUI** (TypeScript — it lives in the same
-TS layer as the loco-plugin, and consumes the exact same JSON contract as
-every other consumer; the dashboard has zero private APIs).
-
-Panes:
-- **Jobs** — services/crons across projects: state, last run, restarts;
-  start/stop/restart/run-now with a keypress; dynamic jobs show owner + TTL,
-  with one-key promote/renew/kill.
-- **Events** — live topic feed with per-cursor unread badges; inspect any
-  event's payload; see which agent claimed what.
-- **Runs & logs** — drill from a job to its run records to captured output.
-- **Approvals** — the pending-approval queue for policy-gated agent `run`
-  requests: what the agent wants to execute, why, one-key allow/deny.
-  (This is the human's most important interactive surface — it is how
-  delegation stays governed without breaking agent flow.)
-- **Recap** — the prose digest, live.
-
-**Use when:** you want eyes on the system or a decision surfaced — everything
-else should reach you via `notify` so the dashboard is a place you *visit*,
-not one you must watch. (pm's future jobs pane embeds a slim read-only
-version of the same panes.)
-
-## Agent-ergonomics guarantees (the contract behind the contract)
-
-1. **Mortality-safe**: every operation assumes the caller may die mid-flight —
-   at-least-once delivery, explicit ack/done, idempotent creates, leases that
-   expire. A successor can always resume.
-2. **Sub-100ms calls; never block**: long work returns an id immediately and
-   pushes the result to your reply topic.
-3. **One-call answers**: `hello`, `status`, `recap` return complete pictures.
-4. **Machine-actionable errors**: failures carry what-to-do-next text in the JSON
-   payload (e.g. `{"schema_version":1,"error":"identity mismatch token=X expected=Y
-   — check .mcp.json"}` on a caller error, `exit 1`), not bare codes. Every JSON
-   payload — success or error — carries `schema_version` (rule 2 up top). The exit
-   code stays
-   within the reserved contract above (0 success / 1 caller error / 2 system
-   error); the actionable detail lives in the message, never in a new exit code.
-5. **Tenancy**: jobs/cursors/topics are owner-namespaced; per-owner rate
-   limits and job-creation caps stop one runaway agent from starving the
-   rest or the machine.
+```
+loco version
+```

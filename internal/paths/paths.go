@@ -51,8 +51,8 @@ func Resolve(configOverride string) (Paths, error) {
 
 	configDir := configOverride
 	if configDir == "" {
-		// Explicit LOCO_CONFIG_DIR wins over XDG so callers (and wok's pr-watch, which
-		// sets it) can pin the config dir without a flag.
+		// Explicit LOCO_CONFIG_DIR wins over XDG so a caller can pin the config
+		// dir without passing a flag.
 		if env := os.Getenv("LOCO_CONFIG_DIR"); env != "" {
 			configDir = env
 		} else if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {

@@ -1,149 +1,151 @@
-# loco examples — everything we plan to run on it
+# loco examples
 
-A cookbook of the concrete usages behind the design. Each example names the
-primitives it exercises. (Repos referenced: `wok` = the automation monorepo
-with roles dev / oncall / rm / team; `pm` = the project navigator.)
+A cookbook of concrete usages built only from commands loco actually
+implements. Each example names the primitives it exercises. See
+[cli.md](cli.md) for the full reference.
 
 ---
 
-## 1. dev/pr-review — the pilot (svc, events broadcast, channel, timer, lock, cron)
+## 1. Nightly backup with failure alerts (cron, notify)
 
-```yaml
-# wok/.loco/jobs.yaml
-services:
-  pr-watch:
-    cmd: python3 .claude/scripts/dev/pr-watch.py watch
-    restart: always
-    notify_on: [crash]
-crons:
-  identity-check:  { schedule: "17 8 * * *",   cmd: .claude/scripts/dev/assert-identity.sh, notify_on: [nonzero] }
-  mirror-presync:  { schedule: "40 7 * * 1-5", cmd: .claude/scripts/dev/pr-review-mirror.sh sync-all }
+Register a job that runs every night and alerts you only when it fails:
+
+```sh
+loco cron add nightly-backup \
+    --schedule "0 3 * * *" \
+    --cmd "/usr/local/bin/backup.sh" \
+    --timeout 30m
 ```
 
-Flow: pr-watch detects a review request → `loco events emit pr-review.dispatch
---id <sha+reason>` → live Claude session receives the `<channel>` push in
-seconds → dispatches conductor subagents → merges state under
-`loco lock acquire wok-pr-state --ttl 5m` → `loco events ack pr-review.dispatch
---cursor dev-loop --through <event-id>`. Session closed?
-The event waits; the next session's `loco hello --agent dev-loop` inherits it
-(succession). Loose ends ("author promised a follow-up issue") become
-`loco timer set --in 72h --topic pr-review.loose-ends --data '{"ref":"pr#6884"}'`.
-The identity-check cron exists because a wrong GitHub identity returns
-silently-empty searches — indistinguishable from a quiet day without an
-asserting job.
+Wire the failure alert by having the script call `loco notify` on a non-zero
+exit, or check outcomes after the fact:
 
-## 2. Agent session lifecycle (hello, status, read/ack, recap)
-
-```console
-$ loco hello --agent dev-loop --json     # first call, any harness
-# → identity, reply topic replies.dev-loop, 1 unacked dispatch, jobs green
-$ loco events read pr-review.dispatch --cursor dev-loop --json   # the tick
-$ loco events ack pr-review.dispatch --cursor dev-loop --through ev_8k2m
-$ loco recap --since 8h                  # human-shaped summary any time
+```sh
+loco runs nightly-backup --failed --last 5
+loco logs nightly-backup --run <run-id> --stderr
 ```
 
-## 3. oncall (cron pollers, broadcast topic, cache, notify)
+`--timeout 30m` bounds a single run so one wedged backup can't hold things up.
 
-```yaml
-crons:
-  sentry-poll:   { schedule: "*/10 * * * *", cmd: .claude/scripts/oncall/sentry-poll.sh,  emit: oncall.alerts }
-  flower-poll:   { schedule: "*/15 * * * *", cmd: .claude/scripts/oncall/flower-poll.sh,  emit: oncall.alerts }
-  handoff-prep:  { schedule: "30 16 * * 5",  cmd: loco events emit oncall.handoff-due --data '{}' }
+## 2. Keeping a dev server or tunnel alive (svc)
+
+A long-running process supervised with restart-on-crash and captured output:
+
+```sh
+loco svc add api-tunnel \
+    --cmd "cloudflared tunnel run my-tunnel" \
+    --restart always \
+    --backoff-initial 1s --backoff-max 30s
+
+loco svc list
+loco svc restart api-tunnel
+loco svc stop api-tunnel
 ```
 
-The oncall session drains `oncall.alerts`; sev-worthy items also
-`loco notify "sev alert" "<summary>" --group sev`. Expensive lookups are shared:
-`loco cache exec --key sentry-top --ttl 5m -- sentry-cli issues list …`
-— the report generator and an interactive "what's burning?" share one API call.
+This is the pattern that retires the "backgrounded process gets reaped when my
+shell exits" problem — the daemon owns the child, not your session.
 
-## 4. rm — release manager (svc watcher, artifacts)
+## 3. Passing a secret to a job without recording it (env-passthrough)
 
-A Slack release-thread watcher (composio CLI) runs as a svc emitting
-`rm.release-updates`. The scheduled release-list generator writes its report
-as an artifact; sessions fetch by reference:
-`loco artifacts tail run_r12 -n 40` instead of regenerating or pasting 20KB.
+`--env KEY=VALUE` writes the value into loco's registry in plaintext. For
+secrets, use `--env-passthrough` instead: the job inherits the variable from
+the daemon's environment, and loco never stores the value.
 
-## 5. team / knowledge base (cron, timer)
+```sh
+# BAD — the token ends up in loco's registry file:
+loco cron add deploy --schedule "@daily" --cmd deploy.sh --env DEPLOY_TOKEN=abc123
 
-```yaml
-crons:
-  kb-validate: { schedule: "5 2 * * *", cmd: .claude/hooks/validate-kb.sh, notify_on: [nonzero] }
-```
-Plus a weekly `loco timer` emitting `kb.curate-due` — /team:kb-curate gets
-prompted by the system instead of by guilt. A cross-role stale-loose-ends
-sweep is one shared cron over the timers' topic.
-
-## 6. Personal dailies (cron + emit + judgment drain)
-
-```yaml
-crons:
-  slack-standup-pull: { schedule: "25 9 * * 1-5",  cmd: scripts/slack-digest.sh, emit: daily.slack-digest }
-  daily-pr-review:    { schedule: "55 17 * * 1-5", cmd: loco events emit daily.review-due --data '{"scope":"my-prs"}' }
-```
-Mechanical half runs and is recorded; the judgment half (summarize, draft
-standup, flag blockers) happens when an agent drains the topic — live session,
-or your opt-in scheduled `claude -p --resume` cron. Growth pattern for every
-future daily: what detects → which topic → who judges.
-
-## 7. The broker in action (run, watch, reply topics)
-
-```console
-# agent, mid-review, without stopping its own work:
-$ loco run "pytest -x tests/" --project wok --reply-to replies.dev-loop
-{"schema_version":1,"run_id":"run_x91","state":"queued"}
-# … result later arrives as an event/channel push: exit 0, 214 passed, artifact run_x91
-
-$ loco watch "gh run view 8123 --json status -q .status" --until completed \
-    --reply-to replies.dev-loop        # deploy/CI watch that outlives the session
-```
-Ad-hoc commands outside the project allowlist queue as pending-approval and
-appear in the TUI Approvals pane + a notify.
-
-## 8. Multi-agent patterns (queue topics, claims, succession)
-
-```console
-# dev conductor found a prod-smelling bug — leave it for whoever runs oncall:
-$ loco events emit tasks.oncall --data '{"ref":"PYTHON-DJANGO-2XX","hint":"spike at 09:00Z"}'
-
-# two oncall workers compete; each event handled exactly once:
-$ loco events claim tasks.oncall --as oncall-worker --lease 10m
-$ loco events done  tasks.oncall --id ev_z14
-```
-Broadcast vs queue: `pr-review.dispatch` is broadcast (loop + auditor + recap
-all read it); `tasks.oncall` is queue (exactly one handler). If a claimant
-dies, its lease expires and the task returns.
-
-## 9. Dynamic job lifecycle (add → renew → promote)
-
-```console
-$ loco cron add flaky-watch --schedule "*/30 * * * *" \
-    --cmd "scripts/check-flaky.sh" --ttl 48h --reason "watching test flake after #6891"
-# … two days later it proved useful:
-$ loco jobs promote wok/flaky-watch     # writes the stanza into .loco/jobs.yaml → PR → review
-# … or it expires silently and recap notes it did.
+# GOOD — loco forwards the variable, records only its name:
+loco cron add deploy --schedule "@daily" --cmd deploy.sh --env-passthrough DEPLOY_TOKEN
 ```
 
-## 10. What a Claude session experiences (channel + hooks)
+## 4. Producing and consuming events (emit, read, ack)
 
-Session starts → SessionStart hook injects `hello` briefing ("1 dispatch
-pending, identity green"). Mid-work, loco finds something →
-`<channel source="loco" topic="pr-review.dispatch">{…}</channel>` appears
-within seconds; the session acts and acks via the CLI. No polling anywhere. On
-harnesses without channels, the same events arrive via MCP tools or plain CLI —
-later, and not lost **so long as the consumer's cursor stays live** (reads or acks
-at least once per 30-day window; a cursor idle beyond that is retired and its unread
-events become eligible for compaction — see final-plan.md §6a). The guarantee is
-"never lost for a live cursor," not unconditional.
+A producer emits events; a consumer reads at its own pace via a named cursor,
+then acks what it actually processed.
 
-## 11. The human experience (ui, notify, recap)
+```sh
+# Producer (any language, any script — one line):
+loco events emit builds --id build-2026-07-16 --data '{"status":"green"}'
 
-`loco ui` (OpenTUI): jobs / events / runs / recap panes and the **Approvals**
-queue for policy-gated agent runs — allow/deny with a keypress. Interruptions
-only via `notify` (grouped: a crash-loop = one alert). `loco recap --since
-yesterday` over coffee. pm's project view embeds the slim read-only pane.
+# Consumer, one tick:
+loco events read builds --cursor ci-watcher --limit 20 --json
 
-## 12. Non-agent uses (the same primitives, no AI anywhere)
+# After the work for those events is durably done:
+loco events ack builds --cursor ci-watcher --through build-2026-07-16
+```
 
-Dev servers/tunnels as svcs per project; nightly repo backups; brew-outdated
-weekly check with notify; a disk-space guard cron. loco doesn't know the
-difference — which is the proof the primitives are actually generic.
+`--id` makes a re-emit a no-op, so a retried producer is safe. Reading never
+advances the cursor — that is what `ack` is for. If the consumer crashes
+between `read` and `ack`, it sees the same events again next time (at-least-once).
+
+## 5. Blocking until an event arrives (read --wait)
+
+Instead of polling in a loop, block until the next event or a timeout:
+
+```sh
+loco events read deploys --cursor release-bot --wait --timeout 5m --json
+```
+
+Exit is prompt when an event lands; on timeout you get an empty result and can
+loop again.
+
+## 6. Acking a batch with a failure in the middle (ack --ids)
+
+When you process a batch and one item fails, you don't want to consume the
+failure. Name exactly the ids you completed:
+
+```sh
+loco events ack jobs --cursor worker --ids ev1,ev2,ev4
+```
+
+The cursor advances over the longest contiguous run from the front and stops
+at the first id you did not name (here `ev3`). `ev4` is above the gap, so it is
+reported and redelivered — the failed `ev3` comes back around rather than being
+silently skipped. Use `--through <id>` instead when you want a plain watermark
+that consumes everything up to and including an id regardless.
+
+## 7. Inspecting a topic without consuming it (peek)
+
+Look at what's on a topic without minting a cursor or advancing anything:
+
+```sh
+loco events peek builds --tail 10
+loco events peek builds --from-seq 42 --json
+```
+
+Use `peek` for debugging and one-off inspection; use `read`/`ack` for a real
+consumer. `peek` deliberately creates no cursor, so it never affects retention.
+
+## 8. One-call situational awareness (status, doctor)
+
+```sh
+loco status            # daemon health, every job's last run, unread counts, recent alerts
+loco doctor            # non-destructive checks: daemon alive, config writable, unit current
+```
+
+`status` is designed to be the first call of any monitoring loop — one command
+answers "what is this machine running, and is anything wrong?". `doctor` is the
+first thing to run after install or an upgrade, or when something feels off.
+
+## 9. Pushing events into a live Claude Code session (mcp serve)
+
+Register loco as an MCP server in a project so an agent hears about events as
+they land, instead of waiting for its next read. See the README for the
+`.mcp.json` wiring; the server itself is:
+
+```sh
+loco mcp serve --channel-topics builds,deploys
+```
+
+The bus stays the source of truth — if no session is open or a push is dropped,
+nothing is lost; the session picks up from its own cursor with `loco events
+read`. Only bridge topics whose producers you wrote: event bodies are untrusted
+data.
+
+## 10. Non-agent uses
+
+None of this involves AI. loco doesn't know the difference between a job that
+feeds an agent and one that doesn't — which is the point. Dev servers as
+services, nightly backups as crons, a weekly `brew outdated` check that notifies
+you, a disk-space guard — all the same primitives.
