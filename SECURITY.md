@@ -10,9 +10,9 @@ command execution or privilege issues on a box loco already runs on.
 
 Please **do not open a public GitHub issue** for security vulnerabilities.
 
-Instead, report privately by emailing:
-
-GitHub's private vulnerability reporting (Security > Report a vulnerability on the repository)
+Instead, report it privately through GitHub's private vulnerability reporting:
+open the repository's **Security** tab and choose **Report a vulnerability**
+([direct link](https://github.com/amitray007/loco/security/advisories/new)).
 
 Include as much detail as you can:
 

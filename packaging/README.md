@@ -1,86 +1,88 @@
 # Release packaging
 
-This directory documents (not automates) how `loco` releases are produced. The
-actual configuration lives at the repo root in `.goreleaser.yaml` and in
-`.github/workflows/release.yml`.
+This directory documents (it does not automate) how `loco` releases are
+produced, and holds the Homebrew formula template. The automation lives at the
+repo root: `.goreleaser.yaml` and `.github/workflows/release-please.yml`.
 
-**Nothing has been published yet.** No tag has been pushed, no GitHub Release
-exists, and the `homebrew-tap` tap repo has not been created. Everything
-described below is dormant config, validated locally only (`goreleaser check`
-/ `goreleaser build --snapshot`), until a human completes the one-time setup
-and pushes a `v*` tag.
+Releases are automated end-to-end via [release-please]. Merging the bot's
+"Release PR" tags the version and runs the publish job. loco has shipped
+releases through the current `CHANGELOG.md` entry.
 
-## How a release works (once live)
+## How a release works
 
-1. A human pushes a tag matching `v*` (e.g. `v0.1.0`) to `github.com/amitray007/loco`.
-2. `.github/workflows/release.yml` triggers on that tag push and runs
-   `goreleaser release --clean`.
-3. goreleaser:
-   - builds `loco` for `darwin/arm64`, `darwin/amd64`, `linux/arm64`,
-     `linux/amd64` with the version baked into the binary via
-     `-X main.version={{.Version}}`,
-   - archives each binary as a `.tar.gz` (including `README.md`, `LICENSE`,
-     `CHANGELOG.md`),
+1. Every push to `main` updates (or opens) a release-please "Release PR" that
+   accumulates the pending version bump and CHANGELOG entry from
+   conventional-commit history. Patch by default; a PR labelled `minor` or
+   `major` bumps accordingly.
+2. Merging that Release PR creates the git tag and GitHub Release, then runs the
+   `publish` job.
+3. `publish` runs `goreleaser release --clean`, which:
+   - builds `loco` for `darwin/{arm64,amd64}` and `linux/{arm64,amd64}` with the
+     version baked in via `-X main.version={{.Version}}`,
+   - archives each binary as a `.tar.gz`,
    - writes `checksums.txt` (sha256),
-   - generates a changelog grouped by conventional-commit prefix
-     (feat/fix/perf/docs/other),
-   - creates a **draft** GitHub Release with all of the above attached (a
-     human still has to publish it — nothing goes live automatically),
-   - pushes an updated Homebrew cask to the `amitray007/homebrew-tap` tap
-     repo under `Casks/loco.rb`.
+   - attaches all artifacts to the loco GitHub Release.
+4. The same job then renders [`loco-formula.template.rb`](loco-formula.template.rb)
+   against the freshly built checksums and publishes it to the public tap repo,
+   `amitray007/homebrew-tap`, as `Formula/loco.rb`.
 
-   Note: `.goreleaser.yaml` uses the `homebrew_casks` block rather than the
-   older `brews` (Homebrew Formula) block. On the goreleaser version pinned
-   for local validation of this repo, `brews` is a hard deprecation failure
-   under `goreleaser check`, while `homebrew_casks` is the supported, passing
-   path and still generates the same per-OS/per-arch download URLs,
-   checksums, `caveats`, `description`, and `license` a formula would carry.
-4. Once published, users install with:
-   ```
-   brew install --cask amitray007/homebrew-tap/loco
-   ```
+Users install with:
 
-## One-time manual setup (has NOT been done yet)
+```sh
+brew install amitray007/tap/loco
+```
 
-Before the first real release can succeed, a human must:
+## Why the binaries also live on the tap
 
-1. **Create the tap repository**: `amitray007/homebrew-tap` on GitHub. It
-   can start empty — goreleaser will create/update
-   `Formula/loco.rb` on each release.
-2. **Create a push token for the tap** and add it as a repository secret on
-   `amitray007/loco` named `HOMEBREW_TAP_TOKEN` (a classic or
-   fine-grained PAT with `contents: write` on `homebrew-tap`). The default
-   `GITHUB_TOKEN` from Actions cannot write to a different repository, so
-   this dedicated secret is required for the tap push step to succeed.
-3. Confirm `GITHUB_TOKEN` (the default Actions token) has permission to
-   create releases on `amitray007/loco` itself — this is normally automatic.
+loco is currently a private repo. Homebrew fetches release assets
+unauthenticated, so a formula pointing at a private repo's assets returns 404.
+To work around that, the publish job uploads the same artifacts to a release on
+the **public** `amitray007/homebrew-tap` repo, and the formula's download URLs
+point there. The assets are still attached to the loco release too, for
+provenance.
 
-Until step 1 and 2 are done, a real (non-snapshot) `goreleaser release` run
-would fail when it tries to push the Homebrew formula.
+If loco is made public, this tap-hosted copy becomes redundant: the formula URLs
+can point back at loco's own release assets and the tap-upload step can be
+removed. See the header comments in `.goreleaser.yaml` and
+`release-please.yml` for the details.
+
+## The formula template
+
+[`loco-formula.template.rb`](loco-formula.template.rb) is a Homebrew **formula**
+(not a cask) with `{{VERSION}}`, `{{TAG}}`, and per-artifact `{{SHA256_*}}`
+placeholders. It is a formula rather than a goreleaser-generated cask because the
+formula keeps a `test do` block, which casks cannot express. The release job
+substitutes the placeholders; CI (`release-check` in `ci.yml`) renders it against
+a probe version on every PR and fails if any placeholder survives or the result
+isn't valid Ruby, so a template break surfaces before a release burns a version.
+
+## Required secret
+
+`HOMEBREW_TAP_TOKEN` — a fine-grained PAT with `contents: write` on
+`amitray007/homebrew-tap`. The default Actions `GITHUB_TOKEN` is scoped to this
+repo and cannot write to the tap, so the publish job needs this dedicated secret.
 
 ## Post-install: starting the daemon
 
-Installing the Homebrew formula only places the `loco` binary — it does
-**not** start any background service. After `brew install
-amitray007/homebrew-tap/loco`, users must run:
+`brew install` only places the `loco` binary — it does not start any background
+service. After installing, run:
 
-```
+```sh
 loco daemon install
 ```
 
-This registers and starts the OS-level service (`launchd` on macOS,
-`systemd` on Linux). The formula's `caveats` message repeats this instruction
-at the end of `brew install`.
+This registers and starts the OS-level service (launchd on macOS, systemd user
+unit on Linux). The formula's `caveats` repeats this at the end of `brew install`.
 
 ## Local validation
 
-These are safe, non-publishing commands used to validate the config in this
-repo:
+Safe, non-publishing commands:
 
-```
+```sh
 goreleaser check
 goreleaser build --snapshot --clean --single-target
 ```
 
-Neither command tags, pushes, publishes a release, or touches the Homebrew
-tap.
+Neither tags, pushes, publishes, nor touches the tap.
+
+[release-please]: https://github.com/googleapis/release-please

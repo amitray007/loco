@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/amitray007/loco/security/advisories/new
+    about: >-
+      Please do NOT open a public issue for security problems. loco runs
+      user-supplied commands under a resident daemon — report privately via a
+      security advisory. See SECURITY.md.

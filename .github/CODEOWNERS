@@ -1,0 +1,3 @@
+# Default owner for everything in the repo. Adding more specific rules below
+# this line will override for matching paths.
+*       @amitray007
